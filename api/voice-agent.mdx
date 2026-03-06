@@ -275,6 +275,33 @@ Generate speech for full text at once (non-streaming fallback). Useful when you 
 await agent.generateAndSendSpeechFull("Hello, how can I help you?");
 ```
 
+#### generateSpeechFromText()
+
+```typescript
+async generateSpeechFromText(text: string, abortSignal?: AbortSignal): Promise<Uint8Array>
+```
+
+Generate speech from text using the configured speech model. Returns the raw audio data as a Uint8Array.
+
+<ParamField path="text" type="string" required>
+  Text to convert to speech
+</ParamField>
+
+<ParamField path="abortSignal" type="AbortSignal">
+  Optional abort signal to cancel generation
+</ParamField>
+
+<ResponseField name="audio" type="Promise<Uint8Array>">
+  The generated audio data
+</ResponseField>
+
+**Example:**
+```typescript
+const audioData = await agent.generateSpeechFromText("Hello world");
+// Process or save the audio data
+fs.writeFileSync("output.mp3", audioData);
+```
+
 ### Speech Control
 
 #### interruptSpeech()
@@ -309,6 +336,38 @@ Interrupt both the current LLM stream and ongoing speech. This is more comprehen
 **Example:**
 ```typescript
 agent.interruptCurrentResponse("user_speaking");
+```
+
+#### startListening()
+
+```typescript
+startListening(): void
+```
+
+Start listening for voice input. This method emits a `listening` event that you can use to update UI or trigger other actions.
+
+**Example:**
+```typescript
+agent.startListening();
+agent.on("listening", () => {
+  console.log("Agent is now listening for voice input");
+});
+```
+
+#### stopListening()
+
+```typescript
+stopListening(): void
+```
+
+Stop listening for voice input. This method emits a `stopped` event.
+
+**Example:**
+```typescript
+agent.stopListening();
+agent.on("stopped", () => {
+  console.log("Agent stopped listening");
+});
 ```
 
 ### History Management
@@ -521,6 +580,26 @@ Emitted for non-fatal warnings.
 ```typescript
 agent.on("warning", (message: string) => {
   console.warn("Warning:", message);
+});
+```
+
+#### listening
+
+Emitted when `startListening()` is called.
+
+```typescript
+agent.on("listening", () => {
+  console.log("Agent started listening for voice input");
+});
+```
+
+#### stopped
+
+Emitted when `stopListening()` is called.
+
+```typescript
+agent.on("stopped", () => {
+  console.log("Agent stopped listening");
 });
 ```
 
