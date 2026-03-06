@@ -1,0 +1,255 @@
+---
+title: 'WebSocketManager'
+description: 'Manages WebSocket connection lifecycle for voice agents'
+---
+
+## Overview
+
+The `WebSocketManager` class handles all WebSocket communication for voice agents. It manages connection establishment, message sending/receiving, and clean disconnection. This manager extends Node.js `EventEmitter` to provide event-driven communication patterns.
+
+**Key responsibilities:**
+- Connect to WebSocket servers or attach existing sockets (server-side)
+- Send and receive JSON messages over WebSocket
+- Handle connection lifecycle events (open, close, error)
+- Gracefully handle socket failures and disconnections
+
+**Location:** `src/core/WebSocketManager.ts:9`
+
+## Constructor
+
+```typescript
+new WebSocketManager()
+```
+
+The WebSocketManager constructor takes no parameters. Configuration happens through the connection methods.
+
+## Properties
+
+### isConnected
+
+```typescript
+get isConnected(): boolean
+```
+
+<ResponseField name="isConnected" type="boolean">
+  Returns `true` if the WebSocket is currently connected and ready to send messages.
+</ResponseField>
+
+### currentSocket
+
+```typescript
+get currentSocket(): WebSocket | undefined
+```
+
+<ResponseField name="currentSocket" type="WebSocket | undefined">
+  Returns the underlying WebSocket instance, or `undefined` if not connected.
+</ResponseField>
+
+## Methods
+
+### connect()
+
+Connect to a WebSocket server by URL (client-side usage).
+
+```typescript
+connect(url: string): Promise<void>
+```
+
+<ParamField path="url" type="string" required>
+  The WebSocket server URL (e.g., `ws://localhost:3000` or `wss://example.com`)
+</ParamField>
+
+**Returns:** Promise that resolves when the connection is established, or rejects on error.
+
+**Example:**
+```typescript
+const wsManager = new WebSocketManager();
+await wsManager.connect('ws://localhost:3000');
+console.log('Connected:', wsManager.isConnected);
+```
+
+**Implementation notes:**
+- Automatically disconnects any existing connection before connecting
+- Emits `connected` event when connection succeeds
+- Rejects the promise if connection fails
+
+### handleSocket()
+
+Attach an existing WebSocket instance (server-side usage).
+
+```typescript
+handleSocket(socket: WebSocket): void
+```
+
+<ParamField path="socket" type="WebSocket" required>
+  An existing WebSocket instance from a server connection
+</ParamField>
+
+**Example:**
+```typescript
+// Server-side with ws library
+wss.on('connection', (socket) => {
+  const wsManager = new WebSocketManager();
+  wsManager.handleSocket(socket);
+});
+```
+
+**Implementation notes:**
+- Immediately marks the connection as active
+- Attaches all event listeners
+- Emits `connected` event synchronously
+- Disconnects any existing connection first
+
+### send()
+
+Send a JSON message over the WebSocket.
+
+```typescript
+send(message: Record<string, unknown>): void
+```
+
+<ParamField path="message" type="Record<string, unknown>" required>
+  A plain JavaScript object that will be JSON-stringified and sent
+</ParamField>
+
+**Example:**
+```typescript
+wsManager.send({
+  type: 'audio',
+  data: base64Audio,
+  format: 'opus'
+});
+```
+
+**Implementation notes:**
+- Silently returns if not connected
+- Checks socket readyState before sending
+- Catches and logs send failures
+- Emits `error` event if send fails
+- Automatically serializes the message to JSON
+
+### disconnect()
+
+Disconnect and clean up the WebSocket connection.
+
+```typescript
+disconnect(): void
+```
+
+**Example:**
+```typescript
+wsManager.disconnect();
+console.log('Disconnected:', !wsManager.isConnected);
+```
+
+**Implementation notes:**
+- Removes all socket event listeners
+- Closes the socket if still open or connecting
+- Ignores errors during close (socket may already be dead)
+- Sets `isConnected` to `false`
+- Does not emit any events
+
+## Events
+
+The `WebSocketManager` emits the following events:
+
+### connected
+
+Emitted when the WebSocket connection is successfully established.
+
+```typescript
+wsManager.on('connected', () => {
+  console.log('WebSocket connected');
+});
+```
+
+### disconnected
+
+Emitted when the WebSocket connection closes.
+
+```typescript
+wsManager.on('disconnected', () => {
+  console.log('WebSocket disconnected');
+});
+```
+
+### message
+
+Emitted when a JSON message is received from the WebSocket.
+
+```typescript
+wsManager.on('message', (data: any) => {
+  console.log('Received:', data.type);
+});
+```
+
+<ResponseField name="data" type="any">
+  The parsed JSON message object. Parse errors trigger the `error` event instead.
+</ResponseField>
+
+### error
+
+Emitted when an error occurs (connection error, parse error, send failure).
+
+```typescript
+wsManager.on('error', (error: Error) => {
+  console.error('WebSocket error:', error);
+});
+```
+
+## Usage in Agent Architecture
+
+The `WebSocketManager` is used internally by voice agents to handle all real-time communication:
+
+```typescript
+class VoiceAgent {
+  private wsManager: WebSocketManager;
+
+  constructor() {
+    this.wsManager = new WebSocketManager();
+    
+    // Forward messages to other managers
+    this.wsManager.on('message', (msg) => {
+      this.handleMessage(msg);
+    });
+    
+    // Handle disconnection
+    this.wsManager.on('disconnected', () => {
+      this.cleanup();
+    });
+  }
+
+  async connect(url: string) {
+    await this.wsManager.connect(url);
+  }
+
+  sendAudio(audioData: string) {
+    this.wsManager.send({
+      type: 'audio',
+      data: audioData,
+      format: 'opus'
+    });
+  }
+}
+```
+
+## Thread Safety
+
+<Warning>
+  The WebSocketManager is **not thread-safe**. All methods should be called from the same event loop context. Do not share instances across worker threads.
+</Warning>
+
+## Error Handling
+
+The manager implements defensive error handling:
+
+- **Send failures:** Caught and logged, emits `error` event
+- **Parse failures:** Logged and emits `error` event, does not crash
+- **Close errors:** Silently ignored (socket may already be closed)
+- **State checks:** Validates readyState before operations
+
+## Related
+
+- [SpeechManager](/api/speech-manager) - Uses WebSocketManager to send audio chunks
+- [TranscriptionManager](/api/transcription-manager) - Receives audio through WebSocketManager
+- [VoiceAgent](/api/voice-agent) - Creates and manages WebSocketManager instance

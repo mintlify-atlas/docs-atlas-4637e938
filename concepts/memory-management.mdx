@@ -1,0 +1,523 @@
+---
+title: Memory Management
+description: Configure conversation history limits with HistoryConfig to control message retention and automatic trimming
+---
+
+## Overview
+
+The `ConversationManager` maintains conversation history with configurable memory limits. When limits are exceeded, **oldest messages are automatically trimmed** to prevent unbounded memory growth and token usage.
+
+## Why Memory Management?
+
+<CardGroup cols={2}>
+  <Card title="Token Limits" icon="coins">
+    Long conversations can exceed model context windows (e.g., 128k tokens)
+  </Card>
+  
+  <Card title="Memory Usage" icon="memory">
+    Unbounded history causes memory leaks in long-running sessions
+  </Card>
+  
+  <Card title="API Costs" icon="dollar-sign">
+    Every message is sent to the LLM on each request (affects cost)
+  </Card>
+  
+  <Card title="Performance" icon="gauge-high">
+    Smaller history = faster LLM processing
+  </Card>
+</CardGroup>
+
+## HistoryConfig
+
+```ts
+interface HistoryConfig {
+  /** Maximum number of messages to keep in history. 
+   *  When exceeded, oldest messages are trimmed. 
+   *  Set to 0 for unlimited. */
+  maxMessages: number;
+  
+  /** Maximum total character count across all messages. 
+   *  When exceeded, oldest messages are trimmed. 
+   *  Set to 0 for unlimited. */
+  maxTotalChars: number;
+}
+```
+
+### Default Configuration
+
+```ts
+const DEFAULT_HISTORY_CONFIG = {
+  maxMessages: 100,       // Keep last 100 messages
+  maxTotalChars: 0,       // Unlimited characters
+};
+```
+
+### Customizing
+
+```ts
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+import { openai } from '@ai-sdk/openai';
+
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  
+  history: {
+    maxMessages: 50,        // Keep last 50 messages (25 turns)
+    maxTotalChars: 50000,   // Or trim when total exceeds 50k chars
+  },
+});
+```
+
+## Trimming Behavior
+
+### Message Count Trimming
+
+When `maxMessages` is exceeded, oldest messages are removed **in pairs** to preserve user/assistant turns:
+
+```ts
+if (maxMessages > 0 && this.conversationHistory.length > maxMessages) {
+  const excess = this.conversationHistory.length - maxMessages;
+  // Round up to even number to preserve turn pairs
+  const toRemove = excess % 2 === 0 ? excess : excess + 1;
+  this.conversationHistory.splice(0, toRemove);
+  
+  this.emit('history_trimmed', {
+    removedCount: toRemove,
+    reason: 'max_messages',
+  });
+}
+```
+
+**Example:**
+
+```ts
+// Configuration
+history: { maxMessages: 10 }
+
+// Current history (12 messages)
+[
+  { role: 'user', content: 'Message 1' },
+  { role: 'assistant', content: 'Response 1' },
+  { role: 'user', content: 'Message 2' },
+  { role: 'assistant', content: 'Response 2' },
+  // ... 8 more messages ...
+]
+
+// After adding 13th message:
+// → 2 oldest messages removed (excess = 3, rounded to 4 for pairs)
+// → 'history_trimmed' event: { removedCount: 4, reason: 'max_messages' }
+```
+
+### Character Count Trimming
+
+When `maxTotalChars` is exceeded, messages are removed **one at a time** from the oldest until total is under the limit:
+
+```ts
+if (maxTotalChars > 0) {
+  let totalChars = this.conversationHistory.reduce((sum, msg) => {
+    const content = typeof msg.content === 'string'
+      ? msg.content
+      : JSON.stringify(msg.content);
+    return sum + content.length;
+  }, 0);
+
+  let removedCount = 0;
+  while (totalChars > maxTotalChars && this.conversationHistory.length > 2) {
+    const removed = this.conversationHistory.shift();
+    if (removed) {
+      const content = typeof removed.content === 'string'
+        ? removed.content
+        : JSON.stringify(removed.content);
+      totalChars -= content.length;
+      removedCount++;
+    }
+  }
+  
+  if (removedCount > 0) {
+    this.emit('history_trimmed', {
+      removedCount,
+      reason: 'max_total_chars',
+    });
+  }
+}
+```
+
+**Example:**
+
+```ts
+// Configuration
+history: { maxTotalChars: 1000 }
+
+// Current history (1200 chars total)
+[
+  { role: 'user', content: '200 chars...' },      // ← Oldest
+  { role: 'assistant', content: '300 chars...' }, // ← Second oldest
+  { role: 'user', content: '400 chars...' },
+  { role: 'assistant', content: '300 chars...' },
+]
+
+// After adding new message (150 chars):
+// Total = 1350 chars (exceeds limit)
+// → Remove oldest message (200 chars) → Total = 1150
+// → Remove second oldest (300 chars) → Total = 850 ✓
+// → 'history_trimmed' event: { removedCount: 2, reason: 'max_total_chars' }
+```
+
+### Minimum History Retention
+
+Character-based trimming always keeps **at least 2 messages** (one user/assistant pair):
+
+```ts
+while (totalChars > maxTotalChars && this.conversationHistory.length > 2) {
+  // Remove oldest message
+}
+```
+
+This ensures the model always has some context, even if a single message exceeds the limit.
+
+## Unlimited History
+
+Set limits to `0` to disable trimming:
+
+```ts
+history: {
+  maxMessages: 0,      // Unlimited messages
+  maxTotalChars: 0,    // Unlimited characters
+}
+```
+
+<Warning>
+Unlimited history can cause:
+- **Memory leaks** in long-running sessions
+- **Token limit errors** when history exceeds model context window
+- **High API costs** as every message is sent on each request
+
+Use unlimited history only for:
+- Short-lived sessions (< 10 minutes)
+- Testing and development
+- Sessions with explicit manual cleanup
+</Warning>
+
+## Events
+
+<ResponseField name="history_trimmed" type="object">
+  Conversation history was automatically trimmed
+  ```ts
+  {
+    removedCount: number;  // Number of messages removed
+    reason: 'max_messages' | 'max_total_chars';
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="history_cleared" type="void">
+  Conversation history was manually cleared via `clearHistory()`
+</ResponseField>
+
+### Listening to Trim Events
+
+```ts
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  history: { maxMessages: 20 },
+});
+
+agent.on('history_trimmed', ({ removedCount, reason }) => {
+  console.log(`Trimmed ${removedCount} messages (reason: ${reason})`);
+  
+  // Optional: Log to analytics, notify user, etc.
+});
+
+agent.on('history_cleared', () => {
+  console.log('History cleared manually');
+});
+```
+
+## Manual History Management
+
+### Clear History
+
+Remove all messages:
+
+```ts
+agent.clearHistory();
+// Emits 'history_cleared' event
+```
+
+### Get History
+
+Retrieve current conversation:
+
+```ts
+import type { ModelMessage } from 'ai';
+
+const history: ModelMessage[] = agent.getHistory();
+console.log(`${history.length} messages in history`);
+
+history.forEach((msg) => {
+  console.log(`${msg.role}: ${msg.content}`);
+});
+```
+
+### Set History
+
+Restore conversation from saved state:
+
+```ts
+import type { ModelMessage } from 'ai';
+
+// Save history to database/file
+const savedHistory: ModelMessage[] = agent.getHistory();
+await db.save(userId, savedHistory);
+
+// Later: restore history
+const restoredHistory = await db.load(userId);
+agent.setHistory(restoredHistory);
+```
+
+### Get History Length
+
+```ts
+const messageCount = agent.getHistory().length;
+console.log(`${messageCount} messages in history`);
+```
+
+## Content Type Handling
+
+The character count includes:
+
+- **String content**: Counted directly
+- **Multimodal content**: JSON-stringified for counting
+
+```ts
+// String content
+{ role: 'user', content: 'Hello!' }  // 6 chars
+
+// Multimodal content
+{
+  role: 'user',
+  content: [
+    { type: 'text', text: 'Describe this image' },
+    { type: 'image', image: 'base64EncodedData...' },
+  ]
+}
+// JSON.stringify(content).length counted
+```
+
+<Info>
+**Image data is counted** in character limits. Use `maxMessages` instead of `maxTotalChars` for vision-enabled agents to avoid unpredictable trimming.
+</Info>
+
+## Example: Session-Based History
+
+```ts
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+import { openai } from '@ai-sdk/openai';
+import Redis from 'ioredis';
+
+const redis = new Redis();
+
+interface Session {
+  userId: string;
+  agent: VoiceAgent;
+}
+
+const sessions = new Map<string, Session>();
+
+wss.on('connection', async (socket, req) => {
+  const userId = req.headers['user-id'] as string;
+  
+  // Load saved history
+  const savedHistory = await redis.get(`history:${userId}`);
+  
+  const agent = new VoiceAgent({
+    model: openai('gpt-4o'),
+    history: {
+      maxMessages: 50,       // Keep last 50 messages
+      maxTotalChars: 100000, // Or 100k chars
+    },
+  });
+  
+  // Restore history
+  if (savedHistory) {
+    agent.setHistory(JSON.parse(savedHistory));
+    console.log(`Restored ${agent.getHistory().length} messages for ${userId}`);
+  }
+  
+  agent.handleSocket(socket);
+  sessions.set(userId, { userId, agent });
+  
+  // Save history periodically
+  const saveInterval = setInterval(async () => {
+    const history = agent.getHistory();
+    await redis.set(`history:${userId}`, JSON.stringify(history));
+  }, 30000); // Every 30 seconds
+  
+  agent.on('disconnected', async () => {
+    clearInterval(saveInterval);
+    
+    // Final save
+    const history = agent.getHistory();
+    await redis.set(`history:${userId}`, JSON.stringify(history));
+    
+    agent.destroy();
+    sessions.delete(userId);
+  });
+});
+```
+
+## Recommended Configurations
+
+### Short Sessions (5-10 minutes)
+
+```ts
+history: {
+  maxMessages: 30,   // ~15 conversation turns
+  maxTotalChars: 0,  // Unlimited (trimming by count sufficient)
+}
+```
+
+### Medium Sessions (30-60 minutes)
+
+```ts
+history: {
+  maxMessages: 100,     // ~50 turns
+  maxTotalChars: 50000, // ~50k chars
+}
+```
+
+### Long Sessions (hours)
+
+```ts
+history: {
+  maxMessages: 200,      // ~100 turns
+  maxTotalChars: 100000, // ~100k chars
+}
+```
+
+### Vision Agents (VideoAgent)
+
+```ts
+history: {
+  maxMessages: 20,   // Images inflate char count
+  maxTotalChars: 0,  // Use message count only
+}
+```
+
+### Cost-Optimized
+
+```ts
+history: {
+  maxMessages: 20,      // Fewer messages = lower API cost
+  maxTotalChars: 10000, // Strict char limit
+}
+```
+
+## Token vs. Character Count
+
+The SDK uses **character count**, not token count, because:
+
+- **Simplicity**: No tokenizer dependency
+- **Predictability**: Same for all models
+- **Performance**: Faster than tokenization
+
+<Info>
+As a rough approximation:
+- **GPT models**: ~4 characters = 1 token
+- **Claude models**: ~3.5 characters = 1 token
+
+So `maxTotalChars: 50000` ≈ 12,500-14,000 tokens.
+</Info>
+
+For precise token counting, use the model's tokenizer externally:
+
+```ts
+import { encodingForModel } from 'js-tiktoken';
+
+const encoding = encodingForModel('gpt-4');
+const tokens = encoding.encode('Your text here');
+console.log(`${tokens.length} tokens`);
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Start conservative">
+    Begin with lower limits and increase if needed:
+    ```ts
+    history: {
+      maxMessages: 50,
+      maxTotalChars: 30000,
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Monitor trim events">
+    Log `history_trimmed` to understand actual usage:
+    ```ts
+    agent.on('history_trimmed', ({ removedCount, reason }) => {
+      analytics.track('history_trimmed', { removedCount, reason });
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Save history for long sessions">
+    Persist history to database for session restoration:
+    ```ts
+    // On disconnect
+    const history = agent.getHistory();
+    await db.saveHistory(userId, history);
+    ```
+  </Accordion>
+
+  <Accordion title="Use maxMessages for vision agents">
+    Image data inflates character counts unpredictably:
+    ```ts
+    // VideoAgent config
+    history: {
+      maxMessages: 20,   // Use message count
+      maxTotalChars: 0,  // Disable char limit
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Clear history on topic change">
+    Allow users to start fresh:
+    ```ts
+    // User says "let's talk about something else"
+    agent.clearHistory();
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Limitations
+
+<Warning>
+**System messages are not affected by trimming.** The `instructions` (system prompt) is always included separately and doesn't count toward limits.
+</Warning>
+
+<Warning>
+**Trimming is irreversible.** Once messages are removed, they cannot be recovered unless saved externally.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="VoiceAgent" icon="microphone" href="/concepts/voice-agent">
+    Learn about the voice agent architecture
+  </Card>
+  
+  <Card title="Streaming Speech" icon="volume" href="/concepts/streaming-speech">
+    Understand speech chunking and generation
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/voice-agent">
+    Full VoiceAgent API documentation
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build your first voice agent
+  </Card>
+</CardGroup>

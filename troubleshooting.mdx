@@ -1,0 +1,599 @@
+---
+title: Troubleshooting
+description: Common issues and solutions for Voice Agent AI SDK
+icon: "wrench"
+---
+
+This guide covers common issues you might encounter when using the Voice Agent AI SDK and how to resolve them.
+
+## WebSocket Connection Issues
+
+<AccordionGroup>
+  <Accordion title="Connection refused or fails to establish">
+    **Symptoms:** 
+    - `Error: connect ECONNREFUSED` 
+    - WebSocket never emits `connected` event
+
+    **Solutions:**
+    
+    1. Verify your WebSocket server is running:
+    ```bash
+    pnpm ws:server
+    ```
+
+    2. Check the WebSocket URL is correct:
+    ```typescript
+    // Make sure the endpoint matches your server
+    await agent.connect("ws://localhost:8080");
+    ```
+
+    3. Ensure no firewall is blocking the port
+
+    4. Check server logs for startup errors
+  </Accordion>
+
+  <Accordion title="Socket closes immediately after connecting">
+    **Symptoms:**
+    - Connection establishes but `disconnected` event fires immediately
+    - `socket.readyState` shows closed state
+
+    **Solutions:**
+
+    1. Check server-side error handling:
+    ```typescript
+    wss.on("connection", (socket) => {
+      const agent = new VoiceAgent({ model, ... });
+      agent.handleSocket(socket);
+      
+      // Listen for errors
+      agent.on("error", (error) => {
+        console.error("Agent error:", error);
+      });
+    });
+    ```
+
+    2. Verify the WebSocket server accepts connections
+
+    3. Check for authentication/authorization issues if implemented
+  </Accordion>
+
+  <Accordion title="Messages not being received">
+    **Symptoms:**
+    - WebSocket connected but messages don't trigger events
+    - Silent failures
+
+    **Solutions:**
+
+    1. Verify message format is valid JSON:
+    ```typescript
+    // Client must send properly formatted messages
+    socket.send(JSON.stringify({
+      type: "transcript",
+      text: "Hello, agent!"
+    }));
+    ```
+
+    2. Check for parsing errors in server logs
+
+    3. Ensure event listeners are attached before connecting:
+    ```typescript
+    agent.on("text", ({ role, text }) => {
+      console.log(`${role}: ${text}`);
+    });
+    
+    await agent.connect();
+    ```
+  </Accordion>
+
+  <Accordion title="Socket state errors when sending">
+    **Symptoms:**
+    - `Cannot send message, socket state: 0` (CONNECTING)
+    - `Cannot send message, socket state: 2` (CLOSING)
+    - `Cannot send message, socket state: 3` (CLOSED)
+
+    **Solutions:**
+
+    The SDK handles these gracefully (v0.1.0+), but if you're seeing warnings:
+
+    1. Wait for the `connected` event before sending:
+    ```typescript
+    agent.on("connected", () => {
+      agent.sendText("Hello!");
+    });
+    ```
+
+    2. Check `agent.connected` before operations:
+    ```typescript
+    if (agent.connected) {
+      await agent.sendText("Hello!");
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Audio & Transcription Issues
+
+<AccordionGroup>
+  <Accordion title="Transcription returns empty text">
+    **Symptoms:**
+    - `transcription_error: Whisper returned empty text`
+    - Warning: `Transcription returned empty text`
+
+    **Solutions:**
+
+    1. Verify audio format is supported:
+    ```typescript
+    // Whisper supports: mp3, mp4, mpeg, mpga, m4a, wav, webm
+    const agent = new VoiceAgent({
+      transcriptionModel: openai.transcription("whisper-1"),
+    });
+    ```
+
+    2. Check audio quality:
+    - Audio should contain clear speech
+    - Minimum duration ~0.5 seconds
+    - Adequate volume level
+
+    3. Verify base64 encoding is correct:
+    ```typescript
+    const base64Audio = Buffer.from(audioBuffer).toString("base64");
+    await agent.sendAudio(base64Audio);
+    ```
+
+    4. Test with a known-good audio file
+  </Accordion>
+
+  <Accordion title="Audio input too large error">
+    **Symptoms:**
+    - `Audio input too large (X MB). Maximum allowed: Y MB`
+
+    **Solutions:**
+
+    1. Increase the limit if needed:
+    ```typescript
+    const agent = new VoiceAgent({
+      maxAudioInputSize: 15 * 1024 * 1024, // 15 MB
+    });
+    ```
+
+    2. Or compress audio before sending:
+    - Use lower bitrate encoding
+    - Reduce sample rate (e.g., 16kHz for speech)
+    - Use more efficient codec (e.g., opus)
+
+    3. Split long audio into chunks if possible
+  </Accordion>
+
+  <Accordion title="Audio playback is choppy or delayed">
+    **Symptoms:**
+    - Audio chunks arrive out of order
+    - Gaps between chunks
+    - High latency
+
+    **Solutions:**
+
+    1. Adjust streaming speech configuration:
+    ```typescript
+    const agent = new VoiceAgent({
+      streamingSpeech: {
+        minChunkSize: 40,        // Smaller = faster start
+        maxChunkSize: 180,       // Larger = fewer requests
+        parallelGeneration: true,
+        maxParallelRequests: 3,  // Increase for faster generation
+      },
+    });
+    ```
+
+    2. Ensure client plays chunks in order:
+    ```javascript
+    // Track chunk order
+    let expectedChunkId = 0;
+    const chunkBuffer = new Map();
+
+    socket.on("message", (data) => {
+      const msg = JSON.parse(data);
+      if (msg.type === "audio_chunk") {
+        chunkBuffer.set(msg.chunkId, msg.data);
+        
+        // Play chunks in order
+        while (chunkBuffer.has(expectedChunkId)) {
+          playAudio(chunkBuffer.get(expectedChunkId));
+          chunkBuffer.delete(expectedChunkId);
+          expectedChunkId++;
+        }
+      }
+    });
+    ```
+
+    3. Check network latency and bandwidth
+  </Accordion>
+
+  <Accordion title="Transcription model not configured">
+    **Symptoms:**
+    - `Error: Transcription model not configured`
+    - Audio input fails silently
+
+    **Solution:**
+
+    Add a transcription model to your configuration:
+    ```typescript
+    import { openai } from "@ai-sdk/openai";
+
+    const agent = new VoiceAgent({
+      model: openai("gpt-4o"),
+      transcriptionModel: openai.transcription("whisper-1"),
+      // ... other options
+    });
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## TTS Generation Issues
+
+<AccordionGroup>
+  <Accordion title="No speech output generated">
+    **Symptoms:**
+    - Text responses work but no audio
+    - `speech_start` event never fires
+
+    **Solutions:**
+
+    1. Verify speech model is configured:
+    ```typescript
+    const agent = new VoiceAgent({
+      model: openai("gpt-4o"),
+      speechModel: openai.speech("tts-1"), // or "gpt-4o-mini-tts"
+      voice: "alloy",
+      outputFormat: "mp3",
+    });
+    ```
+
+    2. Check that you're listening for the right events:
+    ```typescript
+    agent.on("speech_start", ({ streaming }) => {
+      console.log("Speech started, streaming:", streaming);
+    });
+
+    agent.on("audio_chunk", ({ chunkId, data }) => {
+      console.log("Received chunk", chunkId);
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Speech generation is slow">
+    **Symptoms:**
+    - Long delay before first audio chunk
+    - Slow overall response time
+
+    **Solutions:**
+
+    1. Enable parallel generation:
+    ```typescript
+    streamingSpeech: {
+      parallelGeneration: true,
+      maxParallelRequests: 3, // Generate 3 chunks at once
+    }
+    ```
+
+    2. Reduce chunk size for faster time-to-first-audio:
+    ```typescript
+    streamingSpeech: {
+      minChunkSize: 30,  // Lower = faster start
+    }
+    ```
+
+    3. Use faster TTS model:
+    ```typescript
+    speechModel: openai.speech("tts-1"), // Faster than tts-1-hd
+    ```
+  </Accordion>
+
+  <Accordion title="Speech interrupted unexpectedly">
+    **Symptoms:**
+    - `speech_interrupted` event fires without user action
+    - Audio stops mid-sentence
+
+    **Possible causes:**
+
+    1. **Barge-in triggered by new input:**
+    ```typescript
+    // This is expected behavior when user speaks
+    agent.on("speech_interrupted", ({ reason }) => {
+      console.log("Interrupted:", reason); // "user_speaking"
+    });
+    ```
+
+    2. **WebSocket disconnection:**
+    - Check for `disconnected` event
+    - Implement reconnection logic
+
+    3. **Error in speech generation:**
+    - Listen for `error` event
+    - Check API quota/rate limits
+  </Accordion>
+</AccordionGroup>
+
+## Memory & Performance
+
+<AccordionGroup>
+  <Accordion title="Memory usage grows over time">
+    **Symptoms:**
+    - Increasing memory footprint in long sessions
+    - Slow response times
+
+    **Solutions:**
+
+    1. Configure conversation history limits:
+    ```typescript
+    const agent = new VoiceAgent({
+      history: {
+        maxMessages: 50,          // Keep last 50 messages
+        maxTotalChars: 100_000,   // Or limit by character count
+      },
+    });
+    ```
+
+    2. Monitor `history_trimmed` events:
+    ```typescript
+    agent.on("history_trimmed", ({ removedCount, reason }) => {
+      console.log(`Trimmed ${removedCount} messages: ${reason}`);
+    });
+    ```
+
+    3. Clear history periodically if needed:
+    ```typescript
+    agent.clearHistory();
+    ```
+
+    4. Destroy agent instances when done:
+    ```typescript
+    agent.on("disconnected", () => {
+      agent.destroy();
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="High CPU usage">
+    **Symptoms:**
+    - CPU spikes during operation
+    - Server becomes unresponsive
+
+    **Solutions:**
+
+    1. **v0.1.0+**: Speech queue uses promises instead of polling (fixed)
+
+    2. Limit concurrent parallel TTS requests:
+    ```typescript
+    streamingSpeech: {
+      maxParallelRequests: 2, // Lower = less CPU
+    }
+    ```
+
+    3. Monitor active agent instances (one per user):
+    ```typescript
+    const agents = new Map();
+
+    wss.on("connection", (socket) => {
+      const sessionId = generateSessionId();
+      const agent = new VoiceAgent({ ... });
+      agents.set(sessionId, agent);
+
+      agent.on("disconnected", () => {
+        agent.destroy();
+        agents.delete(sessionId);
+      });
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Race conditions or corrupted history">
+    **Symptoms:**
+    - Interleaved messages
+    - Duplicate responses
+    - History contains unexpected messages
+
+    **Solution:**
+
+    This was fixed in **v0.1.0** with the serial input queue. Upgrade if on v0.0.1:
+
+    ```bash
+    pnpm add voice-agent-ai-sdk@latest
+    ```
+
+    The queue ensures:
+    - `sendText()` calls are processed one at a time
+    - WebSocket `transcript` messages are serialized
+    - No concurrent modifications to `conversationHistory`
+  </Accordion>
+</AccordionGroup>
+
+## Error Handling Patterns
+
+<AccordionGroup>
+  <Accordion title="Handling errors gracefully">
+    **Best practices:**
+
+    ```typescript
+    const agent = new VoiceAgent({ ... });
+
+    // Listen for all error types
+    agent.on("error", (error) => {
+      console.error("Agent error:", error);
+      
+      // Notify user
+      socket.send(JSON.stringify({
+        type: "error",
+        message: "Something went wrong. Please try again."
+      }));
+    });
+
+    // Listen for warnings (non-fatal)
+    agent.on("warning", (message) => {
+      console.warn("Agent warning:", message);
+    });
+
+    // Wrap async operations
+    try {
+      await agent.sendText(userInput);
+    } catch (error) {
+      console.error("Failed to process input:", error);
+      // Handle error (retry, notify user, etc.)
+    }
+
+    // Clean up on disconnect
+    agent.on("disconnected", () => {
+      console.log("Client disconnected");
+      agent.destroy();
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Recovering from API failures">
+    **OpenAI API errors:**
+
+    ```typescript
+    agent.on("error", async (error) => {
+      if (error.message.includes("rate limit")) {
+        // Implement exponential backoff
+        await sleep(5000);
+        // Retry or notify user to wait
+      } else if (error.message.includes("quota")) {
+        // Notify about quota exhaustion
+        console.error("API quota exceeded");
+      } else if (error.message.includes("timeout")) {
+        // Retry with increased timeout
+      }
+    });
+    ```
+
+    **Network errors:**
+
+    ```typescript
+    const MAX_RETRIES = 3;
+    let retryCount = 0;
+
+    agent.on("disconnected", async () => {
+      if (retryCount < MAX_RETRIES) {
+        retryCount++;
+        console.log(`Reconnecting (${retryCount}/${MAX_RETRIES})...`);
+        try {
+          await agent.connect();
+          retryCount = 0; // Reset on success
+        } catch (error) {
+          console.error("Reconnection failed:", error);
+        }
+      } else {
+        console.error("Max reconnection attempts reached");
+        agent.destroy();
+      }
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Preventing destroyed agent usage">
+    **Symptoms:**
+    - `Error: VoiceAgent has been destroyed and cannot be used`
+
+    **Solution:**
+
+    Always check `destroyed` state before operations:
+
+    ```typescript
+    if (!agent.destroyed) {
+      await agent.sendText("Hello");
+    }
+
+    // Or handle the error
+    try {
+      await agent.sendText("Hello");
+    } catch (error) {
+      if (error.message.includes("destroyed")) {
+        // Agent was destroyed, create new instance
+        agent = new VoiceAgent({ ... });
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Environment & Configuration
+
+<AccordionGroup>
+  <Accordion title="Environment variables not loading">
+    **Symptoms:**
+    - `OPENAI_API_KEY` undefined
+    - Connection to wrong endpoint
+
+    **Solutions:**
+
+    1. Ensure `.env` file exists in project root:
+    ```bash
+    OPENAI_API_KEY=sk-...
+    VOICE_WS_ENDPOINT=ws://localhost:8080
+    ```
+
+    2. Load dotenv at the top of your entry file:
+    ```typescript
+    import "dotenv/config"; // Must be first import
+    import { VoiceAgent } from "voice-agent-ai-sdk";
+    ```
+
+    3. Verify `.env` is not gitignored when needed
+  </Accordion>
+
+  <Accordion title="TypeScript errors">
+    **Common issues:**
+
+    1. **Missing types:**
+    ```bash
+    pnpm add -D @types/node @types/ws
+    ```
+
+    2. **AI SDK version mismatch:**
+    ```json
+    // package.json
+    {
+      "peerDependencies": {
+        "ai": "^6.0.0"
+      }
+    }
+    ```
+
+    Install matching version:
+    ```bash
+    pnpm add ai@^6.0.0
+    ```
+
+    3. **Module resolution:**
+    ```json
+    // tsconfig.json
+    {
+      "compilerOptions": {
+        "moduleResolution": "node",
+        "esModuleInterop": true
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Getting Help
+
+If you're still experiencing issues:
+
+1. **Check the changelog** for recent fixes and breaking changes
+2. **Review example code** in the repository:
+   - `example/demo.ts` — text-only usage
+   - `example/ws-server.ts` — WebSocket server
+   - `example/voice-client.html` — browser client
+3. **Enable debug logging** to see what's happening:
+   ```typescript
+   agent.on("chunk:text_delta", ({ text }) => console.log("[LLM]", text));
+   agent.on("speech_chunk_queued", ({ id, text }) => console.log("[TTS Queue]", id, text));
+   agent.on("audio_chunk", ({ chunkId }) => console.log("[Audio]", chunkId));
+   ```
+4. **Report issues** on [GitHub](https://github.com/Bijit-Mondal/voiceAgent/issues) with:
+   - Voice Agent AI SDK version
+   - Node.js version
+   - Minimal reproduction code
+   - Error messages and logs

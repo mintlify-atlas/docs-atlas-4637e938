@@ -1,0 +1,446 @@
+---
+title: 'TranscriptionManager'
+description: 'Handles audio transcription for voice agents using AI SDK models'
+---
+
+## Overview
+
+The `TranscriptionManager` class manages speech-to-text (STT) transcription for voice agents. It handles incoming audio data, validates it, transcribes it using AI SDK transcription models (e.g., Whisper), and sends results to clients.
+
+**Key responsibilities:**
+- Transcribe audio data to text using AI SDK transcription models
+- Validate incoming audio size against configured limits
+- Decode base64-encoded audio from WebSocket messages
+- Send transcription results back to clients
+- Emit transcription events for agent processing
+
+**Location:** `src/core/TranscriptionManager.ts:17`
+
+## Constructor
+
+```typescript
+new TranscriptionManager(options?: TranscriptionManagerOptions)
+```
+
+<ParamField path="options" type="TranscriptionManagerOptions">
+  Optional configuration object
+</ParamField>
+
+<ParamField path="options.transcriptionModel" type="TranscriptionModel">
+  AI SDK transcription model instance (e.g., `openai.transcription('whisper-1')`)
+</ParamField>
+
+<ParamField path="options.maxAudioInputSize" type="number" default={26214400}>
+  Maximum audio size in bytes (default: 25 MB). Audio larger than this will be rejected.
+</ParamField>
+
+**Example:**
+```typescript
+import { openai } from '@ai-sdk/openai';
+
+const transcriptionManager = new TranscriptionManager({
+  transcriptionModel: openai.transcription('whisper-1'),
+  maxAudioInputSize: 10 * 1024 * 1024 // 10 MB
+});
+```
+
+## Properties
+
+### hasTranscriptionModel
+
+```typescript
+get hasTranscriptionModel(): boolean
+```
+
+<ResponseField name="hasTranscriptionModel" type="boolean">
+  Returns `true` if a transcription model is configured. If `false`, transcription requests will fail.
+</ResponseField>
+
+### sendMessage
+
+```typescript
+public sendMessage: (message: Record<string, unknown>) => void
+```
+
+<ParamField path="sendMessage" type="(message: Record<string, unknown>) => void" required>
+  Callback function to send messages over WebSocket. Must be set by the parent agent.
+</ParamField>
+
+**Example:**
+```typescript
+transcriptionManager.sendMessage = (msg) => {
+  wsManager.send(msg);
+};
+```
+
+## Methods
+
+### transcribeAudio()
+
+Transcribe audio data to text using the configured transcription model.
+
+```typescript
+transcribeAudio(audioData: Buffer | Uint8Array): Promise<string>
+```
+
+<ParamField path="audioData" type="Buffer | Uint8Array" required>
+  Raw audio data in a format supported by the transcription model (e.g., WAV, MP3, OGG)
+</ParamField>
+
+**Returns:** Promise resolving to the transcribed text.
+
+**Throws:** Error if no transcription model is configured or if transcription fails.
+
+**Example:**
+```typescript
+const audioBuffer = fs.readFileSync('recording.wav');
+const text = await transcriptionManager.transcribeAudio(audioBuffer);
+console.log('Transcribed:', text);
+```
+
+**Events emitted:**
+- `transcription` - When transcription succeeds
+
+**WebSocket messages sent:**
+- `transcription_result` - Contains transcribed text and detected language
+
+**Implementation notes:**
+- Uses AI SDK's `experimental_transcribe` function
+- Logs audio size and transcription result
+- Returns the detected language in the transcription event
+- Automatically sends result to client via WebSocket
+
+### processAudioInput()
+
+Process incoming base64-encoded audio: validate, decode, and transcribe.
+
+```typescript
+processAudioInput(
+  base64Audio: string,
+  format?: string
+): Promise<string | null>
+```
+
+<ParamField path="base64Audio" type="string" required>
+  Base64-encoded audio data from the client
+</ParamField>
+
+<ParamField path="format" type="string">
+  Optional audio format hint (e.g., 'wav', 'mp3', 'ogg', 'webm')
+</ParamField>
+
+**Returns:** Promise resolving to transcribed text, or `null` if validation fails or transcription returns empty.
+
+**Example:**
+```typescript
+// Handle incoming audio from WebSocket
+wsManager.on('message', async (msg) => {
+  if (msg.type === 'audio_input') {
+    const text = await transcriptionManager.processAudioInput(
+      msg.data,
+      msg.format
+    );
+    
+    if (text) {
+      console.log('User said:', text);
+      await handleUserInput(text);
+    }
+  }
+});
+```
+
+**Validation steps:**
+
+1. **Check model configured** - Returns `null` if no transcription model
+2. **Decode base64** - Converts to Buffer
+3. **Validate size** - Rejects if exceeds `maxAudioInputSize`
+4. **Check empty** - Returns `null` if buffer is empty
+5. **Transcribe** - Calls `transcribeAudio()`
+6. **Validate result** - Returns `null` if transcription is empty
+
+**Events emitted:**
+- `audio_received` - When audio is received and validated
+- `transcription` - When transcription succeeds
+- `warning` - For empty audio or empty transcription results
+- `error` - For size limits or transcription failures
+
+**WebSocket messages sent:**
+- `transcription_result` - On success
+- `transcription_error` - On failure
+- `error` - For configuration errors
+
+## Events
+
+The `TranscriptionManager` extends `EventEmitter` and emits the following events:
+
+### transcription
+
+Emitted when audio is successfully transcribed.
+
+```typescript
+transcriptionManager.on('transcription', (data) => {
+  console.log(`Transcribed (${data.language}): ${data.text}`);
+});
+```
+
+<ResponseField name="data.text" type="string">
+  The transcribed text
+</ResponseField>
+
+<ResponseField name="data.language" type="string | undefined">
+  The detected language code (e.g., 'en', 'es', 'fr') if available
+</ResponseField>
+
+### audio_received
+
+Emitted when audio data is received and validated.
+
+```typescript
+transcriptionManager.on('audio_received', (data) => {
+  console.log(`Received ${data.size} bytes of ${data.format} audio`);
+});
+```
+
+<ResponseField name="data.size" type="number">
+  Audio data size in bytes
+</ResponseField>
+
+<ResponseField name="data.format" type="string | undefined">
+  Audio format if provided
+</ResponseField>
+
+### warning
+
+Emitted for non-critical issues (empty audio, empty transcription).
+
+```typescript
+transcriptionManager.on('warning', (message) => {
+  console.warn('Transcription warning:', message);
+});
+```
+
+### error
+
+Emitted when transcription fails or validation errors occur.
+
+```typescript
+transcriptionManager.on('error', (error) => {
+  console.error('Transcription error:', error);
+});
+```
+
+## WebSocket Message Protocol
+
+### Incoming Messages
+
+**Audio input from client:**
+```json
+{
+  "type": "audio_input",
+  "data": "<base64-encoded-audio>",
+  "format": "webm" // optional
+}
+```
+
+### Outgoing Messages
+
+**Transcription result:**
+```json
+{
+  "type": "transcription_result",
+  "text": "Hello, how are you?",
+  "language": "en"
+}
+```
+
+**Transcription error:**
+```json
+{
+  "type": "transcription_error",
+  "error": "Transcription failed: Model timeout"
+}
+```
+
+**Configuration error:**
+```json
+{
+  "type": "error",
+  "error": "Transcription model not configured for audio input"
+}
+```
+
+## Usage in Agent Architecture
+
+```typescript
+class VoiceAgent {
+  private transcriptionManager: TranscriptionManager;
+  private wsManager: WebSocketManager;
+
+  constructor(config: VoiceAgentConfig) {
+    this.transcriptionManager = new TranscriptionManager({
+      transcriptionModel: config.transcriptionModel,
+      maxAudioInputSize: config.maxAudioInputSize
+    });
+    
+    // Connect to WebSocket
+    this.transcriptionManager.sendMessage = (msg) => {
+      this.wsManager.send(msg);
+    };
+    
+    // Handle transcription results
+    this.transcriptionManager.on('transcription', (data) => {
+      console.log(`User said: ${data.text}`);
+      this.processUserInput(data.text);
+    });
+    
+    // Handle transcription errors
+    this.transcriptionManager.on('error', (error) => {
+      console.error('Transcription failed:', error);
+    });
+  }
+
+  private setupWebSocket() {
+    this.wsManager.on('message', async (msg) => {
+      if (msg.type === 'audio_input') {
+        // Interrupt agent speech when user starts speaking
+        if (this.speechManager.isSpeaking) {
+          this.speechManager.interruptSpeech('user_spoke');
+        }
+        
+        // Process the audio
+        const text = await this.transcriptionManager.processAudioInput(
+          msg.data,
+          msg.format
+        );
+        
+        if (text) {
+          await this.handleUserInput(text);
+        }
+      }
+    });
+  }
+}
+```
+
+## Audio Format Support
+
+The TranscriptionManager supports various audio formats depending on the underlying transcription model:
+
+### Common Formats (Whisper)
+
+- **WAV** - Uncompressed audio (large file size)
+- **MP3** - Compressed, widely supported
+- **OGG/Opus** - Efficient compression, good for real-time
+- **WebM** - Modern format, browser-friendly
+- **FLAC** - Lossless compression
+
+<Info>
+  The actual format support depends on the transcription model provider. OpenAI's Whisper supports most common formats.
+</Info>
+
+## Size Limits and Validation
+
+### Default Limit
+
+The default `maxAudioInputSize` is **25 MB** (26,214,400 bytes).
+
+### Choosing the Right Limit
+
+<ParamField path="maxAudioInputSize" type="number">
+  Consider these factors:
+  - **API limits:** OpenAI Whisper has a 25 MB limit
+  - **Network latency:** Larger files take longer to upload
+  - **Use case:** Short voice messages vs. long recordings
+  - **Format:** Compressed formats (MP3, Opus) are smaller than WAV
+</ParamField>
+
+**Example limits:**
+```typescript
+// Short voice messages (< 30 seconds)
+maxAudioInputSize: 5 * 1024 * 1024 // 5 MB
+
+// Standard voice input (< 2 minutes)
+maxAudioInputSize: 10 * 1024 * 1024 // 10 MB
+
+// Extended recordings (< 10 minutes)
+maxAudioInputSize: 25 * 1024 * 1024 // 25 MB
+```
+
+### Size Validation Flow
+
+```typescript
+// 1. Decode base64
+const audioBuffer = Buffer.from(base64Audio, 'base64');
+
+// 2. Check size
+if (audioBuffer.length > this.maxAudioInputSize) {
+  const sizeMB = (audioBuffer.length / (1024 * 1024)).toFixed(1);
+  const maxMB = (this.maxAudioInputSize / (1024 * 1024)).toFixed(1);
+  emit('error', new Error(
+    `Audio input too large (${sizeMB} MB). Maximum allowed: ${maxMB} MB`
+  ));
+  return null;
+}
+
+// 3. Check empty
+if (audioBuffer.length === 0) {
+  emit('warning', 'Received empty audio data');
+  return null;
+}
+```
+
+## Error Handling
+
+### Configuration Errors
+
+```typescript
+if (!transcriptionModel) {
+  throw new Error('Transcription model not configured');
+}
+```
+
+### Transcription Errors
+
+```typescript
+try {
+  const result = await transcribe({ model, audio });
+} catch (error) {
+  console.error('Whisper transcription failed:', error);
+  throw error; // Propagates to caller
+}
+```
+
+### Empty Result Handling
+
+```typescript
+if (!transcribedText.trim()) {
+  emit('warning', 'Transcription returned empty text');
+  sendMessage({
+    type: 'transcription_error',
+    error: 'Whisper returned empty text'
+  });
+  return null;
+}
+```
+
+## Performance Considerations
+
+### Latency
+
+- **Network upload:** Depends on audio size and connection speed
+- **API processing:** Typically 1-3 seconds for Whisper
+- **Total latency:** Usually 2-5 seconds for short audio clips
+
+### Optimization Tips
+
+1. **Use compressed formats** - Opus/MP3 are much smaller than WAV
+2. **Keep recordings short** - Under 30 seconds for best UX
+3. **Show loading indicators** - Transcription is not instant
+4. **Handle errors gracefully** - Provide fallback UI for failures
+
+## Related
+
+- [WebSocketManager](/api/websocket-manager) - Receives audio data from clients
+- [SpeechManager](/api/speech-manager) - Works with TranscriptionManager for barge-in
+- [VoiceAgent](/api/voice-agent) - Orchestrates transcription with conversation flow
+- [AI SDK Transcription](https://sdk.vercel.ai/docs/reference/ai-sdk-core/transcribe) - Underlying transcription API

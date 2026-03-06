@@ -1,0 +1,615 @@
+---
+title: 'History Management'
+description: 'Manage conversation history, configure memory limits, and persist conversation state'
+---
+
+## Overview
+
+The Voice Agent SDK provides comprehensive conversation history management with configurable memory limits, automatic trimming, and methods to persist and restore conversation state.
+
+## Conversation History
+
+Conversation history is stored as an array of `ModelMessage` objects from the AI SDK:
+
+```typescript
+type ModelMessage = {
+  role: 'user' | 'assistant' | 'system';
+  content: string | Array<{ type: 'text' | 'image'; text?: string; image?: string }>;
+  // ... other AI SDK fields
+};
+```
+
+The agent automatically maintains this history:
+- User messages are added when input is received
+- Assistant messages are added after responses are generated
+- History is used as context for subsequent interactions
+
+## Basic History Operations
+
+### Getting History
+
+Retrieve the current conversation history:
+
+```typescript
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+
+const agent = new VoiceAgent({ /* ... */ });
+
+await agent.sendText("What's the weather?");
+await agent.sendText("How about tomorrow?");
+
+const history = agent.getHistory();
+console.log(`Total messages: ${history.length}`);
+
+history.forEach((msg, i) => {
+  console.log(`${i + 1}. [${msg.role}] ${msg.content}`);
+});
+```
+
+**Output:**
+```
+Total messages: 4
+1. [user] What's the weather?
+2. [assistant] It's currently 72°F and sunny.
+3. [user] How about tomorrow?
+4. [assistant] Tomorrow will be partly cloudy with a high of 68°F.
+```
+
+### Setting History
+
+Restore a previous conversation:
+
+```typescript
+import { ModelMessage } from 'ai';
+
+// Load history from database/storage
+const savedHistory: ModelMessage[] = await loadFromDatabase(sessionId);
+
+// Restore to agent
+agent.setHistory(savedHistory);
+
+// Continue conversation with context
+await agent.sendText("What were we talking about?");
+```
+
+<Note>
+`setHistory()` **replaces** the entire conversation history. It does not append.
+</Note>
+
+### Clearing History
+
+Reset the conversation:
+
+```typescript
+// Clear all history
+agent.clearHistory();
+
+// Emits 'history_cleared' event
+agent.on('history_cleared', () => {
+  console.log('Conversation reset');
+  updateUI('New conversation');
+});
+```
+
+## History Configuration
+
+Configure automatic history limits to manage memory and context window usage:
+
+```typescript
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  history: {
+    maxMessages: 50,        // Keep last 50 messages
+    maxTotalChars: 100_000  // Or trim when total exceeds 100k chars
+  }
+});
+```
+
+### Configuration Options
+
+<ParamField path="maxMessages" type="number" default="100">
+  Maximum number of messages to keep in history. When exceeded, oldest messages are trimmed in pairs (user + assistant) to preserve conversation turns.
+  
+  Set to `0` for unlimited.
+  
+  ```typescript
+  history: {
+    maxMessages: 50  // Keep last 50 messages
+  }
+  ```
+</ParamField>
+
+<ParamField path="maxTotalChars" type="number" default="0">
+  Maximum total character count across all messages. When exceeded, oldest messages are trimmed one at a time until under the limit.
+  
+  Set to `0` for unlimited (default).
+  
+  ```typescript
+  history: {
+    maxTotalChars: 100_000  // 100k character limit
+  }
+  ```
+</ParamField>
+
+### Default Configuration
+
+From the source code:
+
+```typescript
+// From types.ts:49-52
+export const DEFAULT_HISTORY_CONFIG: HistoryConfig = {
+  maxMessages: 100,
+  maxTotalChars: 0, // unlimited by default
+};
+```
+
+## Automatic Trimming
+
+### How Trimming Works
+
+The agent automatically trims history after each message:
+
+<Steps>
+  <Step title="Message added to history">
+    User or assistant message is appended to the history array.
+  </Step>
+  
+  <Step title="Check maxMessages">
+    If `history.length > maxMessages`, remove oldest messages in pairs to preserve turns.
+  </Step>
+  
+  <Step title="Check maxTotalChars">
+    Calculate total character count. If exceeded, remove oldest messages one at a time.
+  </Step>
+  
+  <Step title="Emit event">
+    If any messages were trimmed, emit `history_trimmed` event with details.
+  </Step>
+</Steps>
+
+### Trimming Implementation
+
+From the source code:
+
+```typescript
+// From ConversationManager.ts:74-121
+private trimHistory(): void {
+  const { maxMessages, maxTotalChars } = this.historyConfig;
+
+  // Trim by message count
+  if (maxMessages > 0 && this.conversationHistory.length > maxMessages) {
+    const excess = this.conversationHistory.length - maxMessages;
+    // Round up to even number to preserve turn pairs
+    const toRemove = excess % 2 === 0 ? excess : excess + 1;
+    this.conversationHistory.splice(0, toRemove);
+    this.emit('history_trimmed', {
+      removedCount: toRemove,
+      reason: 'max_messages',
+    });
+  }
+
+  // Trim by total character count
+  if (maxTotalChars > 0) {
+    let totalChars = this.conversationHistory.reduce((sum, msg) => {
+      const content =
+        typeof msg.content === 'string'
+          ? msg.content
+          : JSON.stringify(msg.content);
+      return sum + content.length;
+    }, 0);
+
+    let removedCount = 0;
+    while (
+      totalChars > maxTotalChars &&
+      this.conversationHistory.length > 2
+    ) {
+      const removed = this.conversationHistory.shift();
+      if (removed) {
+        const content =
+          typeof removed.content === 'string'
+            ? removed.content
+            : JSON.stringify(removed.content);
+        totalChars -= content.length;
+        removedCount++;
+      }
+    }
+    if (removedCount > 0) {
+      this.emit('history_trimmed', {
+        removedCount,
+        reason: 'max_total_chars',
+      });
+    }
+  }
+}
+```
+
+<Note>
+**Important:** When trimming by `maxMessages`, messages are removed in **pairs** (user + assistant) to maintain conversation turn structure. When trimming by `maxTotalChars`, messages are removed one at a time.
+</Note>
+
+### Trimming Events
+
+Listen for trim events to log or update UI:
+
+```typescript
+agent.on('history_trimmed', ({ removedCount, reason }) => {
+  console.log(`Trimmed ${removedCount} messages (${reason})`);
+  
+  if (reason === 'max_messages') {
+    console.log('Reached max message limit');
+  } else if (reason === 'max_total_chars') {
+    console.log('Reached max character limit');
+  }
+  
+  // Update UI
+  updateHistoryCounter(agent.getHistory().length);
+});
+```
+
+## Persisting Conversation State
+
+### Save to Database
+
+```typescript
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+import { db } from './database';
+
+const agent = new VoiceAgent({ /* ... */ });
+
+// Save after each interaction
+agent.on('text', async ({ role, text }) => {
+  if (role === 'assistant') {
+    const history = agent.getHistory();
+    await db.conversations.update(sessionId, {
+      history: JSON.stringify(history),
+      lastUpdated: new Date()
+    });
+  }
+});
+
+// Or save periodically
+setInterval(async () => {
+  const history = agent.getHistory();
+  await db.conversations.update(sessionId, {
+    history: JSON.stringify(history)
+  });
+}, 60000); // Every minute
+```
+
+### Restore from Database
+
+```typescript
+async function restoreConversation(sessionId: string) {
+  // Load from database
+  const session = await db.conversations.findById(sessionId);
+  if (!session) {
+    throw new Error('Session not found');
+  }
+  
+  // Parse history
+  const history = JSON.parse(session.history);
+  
+  // Create agent with restored history
+  const agent = new VoiceAgent({
+    model: openai('gpt-4o'),
+    // ... other config
+  });
+  
+  agent.setHistory(history);
+  
+  return agent;
+}
+
+// Usage
+const agent = await restoreConversation('session-123');
+await agent.sendText('Continue where we left off');
+```
+
+### Save to Local Storage (Browser)
+
+```javascript
+// Save to localStorage
+function saveConversation() {
+  const history = agent.getHistory();
+  localStorage.setItem('conversation_history', JSON.stringify(history));
+  localStorage.setItem('conversation_timestamp', Date.now().toString());
+}
+
+// Restore from localStorage
+function restoreConversation() {
+  const saved = localStorage.getItem('conversation_history');
+  if (saved) {
+    const history = JSON.parse(saved);
+    agent.setHistory(history);
+    
+    const timestamp = localStorage.getItem('conversation_timestamp');
+    console.log(`Restored conversation from ${new Date(Number(timestamp))}`);
+  }
+}
+
+// Auto-save on message
+agent.on('text', ({ role }) => {
+  if (role === 'assistant') {
+    saveConversation();
+  }
+});
+
+// Restore on page load
+window.addEventListener('load', restoreConversation);
+```
+
+## Advanced Patterns
+
+### Conversation Summarization
+
+Summarize old messages to save context window space:
+
+```typescript
+import { openai } from '@ai-sdk/openai';
+import { generateText } from 'ai';
+
+async function summarizeAndTrim(agent: VoiceAgent) {
+  const history = agent.getHistory();
+  
+  if (history.length < 20) return; // Don't summarize short histories
+  
+  // Take first 10 messages to summarize
+  const toSummarize = history.slice(0, 10);
+  const toKeep = history.slice(10);
+  
+  // Generate summary
+  const { text: summary } = await generateText({
+    model: openai('gpt-4o-mini'),
+    messages: [
+      {
+        role: 'system',
+        content: 'Summarize the following conversation concisely.'
+      },
+      ...toSummarize
+    ]
+  });
+  
+  // Replace old messages with summary
+  agent.setHistory([
+    { role: 'system', content: `Previous conversation summary: ${summary}` },
+    ...toKeep
+  ]);
+  
+  console.log('Summarized and trimmed conversation history');
+}
+
+// Run periodically
+setInterval(() => summarizeAndTrim(agent), 5 * 60 * 1000); // Every 5 minutes
+```
+
+### Session Management
+
+```typescript
+class SessionManager {
+  private sessions = new Map<string, ModelMessage[]>();
+  
+  createSession(sessionId: string): VoiceAgent {
+    const agent = new VoiceAgent({
+      model: openai('gpt-4o'),
+      history: {
+        maxMessages: 50,
+        maxTotalChars: 100_000
+      }
+    });
+    
+    // Restore history if exists
+    if (this.sessions.has(sessionId)) {
+      agent.setHistory(this.sessions.get(sessionId)!);
+    }
+    
+    // Auto-save on changes
+    agent.on('text', ({ role }) => {
+      if (role === 'assistant') {
+        this.sessions.set(sessionId, agent.getHistory());
+      }
+    });
+    
+    return agent;
+  }
+  
+  deleteSession(sessionId: string) {
+    this.sessions.delete(sessionId);
+  }
+  
+  getAllSessions(): string[] {
+    return Array.from(this.sessions.keys());
+  }
+}
+
+const sessionManager = new SessionManager();
+
+// On WebSocket connection
+wss.on('connection', (socket, request) => {
+  const sessionId = request.headers['x-session-id'] as string;
+  const agent = sessionManager.createSession(sessionId);
+  agent.handleSocket(socket);
+  
+  socket.on('close', () => {
+    // Keep session in memory for reconnection
+    console.log(`Session ${sessionId} disconnected but preserved`);
+  });
+});
+```
+
+### Export Conversation
+
+```typescript
+function exportConversation(agent: VoiceAgent, format: 'json' | 'text' | 'markdown') {
+  const history = agent.getHistory();
+  
+  switch (format) {
+    case 'json':
+      return JSON.stringify(history, null, 2);
+    
+    case 'text':
+      return history
+        .map(msg => `${msg.role.toUpperCase()}: ${msg.content}`)
+        .join('\n\n');
+    
+    case 'markdown':
+      return history
+        .map(msg => {
+          const icon = msg.role === 'user' ? '👤' : '🤖';
+          return `### ${icon} ${msg.role}\n\n${msg.content}`;
+        })
+        .join('\n\n---\n\n');
+  }
+}
+
+// Usage
+const markdown = exportConversation(agent, 'markdown');
+await fs.writeFile('conversation.md', markdown);
+```
+
+### Conditional History Clearing
+
+```typescript
+function clearHistoryIfNeeded(agent: VoiceAgent) {
+  const history = agent.getHistory();
+  
+  // Clear if last message was more than 1 hour ago
+  const lastMessage = history[history.length - 1];
+  if (lastMessage && isOlderThan(lastMessage, 60 * 60 * 1000)) {
+    console.log('Clearing stale conversation');
+    agent.clearHistory();
+    return true;
+  }
+  
+  return false;
+}
+
+// Check on new input
+agent.on('text', ({ role }) => {
+  if (role === 'user') {
+    clearHistoryIfNeeded(agent);
+  }
+});
+```
+
+## VideoAgent History
+
+VideoAgent extends history management with frame context:
+
+```typescript
+import { VideoAgent } from 'voice-agent-ai-sdk';
+
+const videoAgent = new VideoAgent({
+  model: openai('gpt-4o'),  // Vision-enabled model required
+  maxContextFrames: 10,     // Keep last 10 frames in context
+  history: {
+    maxMessages: 50
+  }
+});
+
+// Get frame context
+const frameContext = videoAgent.getFrameContext();
+console.log(`Frames in context: ${frameContext.length}`);
+
+// Clear both message and frame history
+videoAgent.clearHistory();
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Set appropriate limits based on your model">
+    Consider your model's context window:
+    
+    - GPT-4o: 128k tokens ≈ 100k characters → `maxTotalChars: 100_000`
+    - GPT-4o-mini: 128k tokens ≈ 100k characters → `maxTotalChars: 80_000`
+    - Claude 3.5: 200k tokens → `maxTotalChars: 150_000`
+  </Accordion>
+  
+  <Accordion title="Balance maxMessages and maxTotalChars">
+    Use both limits for robust memory management:
+    
+    ```typescript
+    history: {
+      maxMessages: 50,        // Prevent too many turns
+      maxTotalChars: 100_000  // Prevent token overflow
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Persist history for important conversations">
+    Save to database after each assistant response to enable conversation restoration across sessions.
+  </Accordion>
+  
+  <Accordion title="Monitor trim events">
+    Log trim events to understand when limits are hit:
+    
+    ```typescript
+    agent.on('history_trimmed', ({ removedCount, reason }) => {
+      logger.info('History trimmed', { removedCount, reason });
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Use summarization for long conversations">
+    For multi-hour conversations, periodically summarize old messages instead of discarding them.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="History growing too large">
+    Reduce `maxMessages` or `maxTotalChars`. Enable trimming events to monitor:
+    
+    ```typescript
+    agent.on('history_trimmed', ({ removedCount, reason }) => {
+      console.log(`Trimmed ${removedCount} messages: ${reason}`);
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Context seems lost after trim">
+    This is expected. Consider:
+    - Increasing limits
+    - Implementing summarization
+    - Adding key context to system prompt
+  </Accordion>
+  
+  <Accordion title="setHistory not working">
+    Ensure history format matches AI SDK `ModelMessage[]` type:
+    
+    ```typescript
+    const history: ModelMessage[] = [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi there!' }
+    ];
+    agent.setHistory(history);
+    ```
+  </Accordion>
+  
+  <Accordion title="Restored conversation feels disconnected">
+    Add a system message with context when restoring:
+    
+    ```typescript
+    const restoredHistory = [
+      {
+        role: 'system',
+        content: 'Continuing previous conversation from [timestamp]'
+      },
+      ...savedHistory
+    ];
+    agent.setHistory(restoredHistory);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Learn about all configuration options including history limits
+  </Card>
+  <Card title="Tool Integration" icon="wrench" href="/guides/tool-integration">
+    See how tools interact with conversation history
+  </Card>
+</CardGroup>

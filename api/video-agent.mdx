@@ -1,0 +1,788 @@
+---
+title: "VideoAgent"
+description: "A multimodal agent that processes video frames along with voice for vision-enabled AI interactions"
+---
+
+## Overview
+
+The `VideoAgent` class extends voice capabilities with video frame processing, enabling multimodal AI conversations that can see and hear. It manages real-time video frames, audio input, and conversation history with visual context.
+
+**Important:** Like `VoiceAgent`, each `VideoAgent` instance is designed for **one user per instance**. Create a separate instance for each connection.
+
+```typescript
+wss.on("connection", (socket) => {
+  const agent = new VideoAgent({ model, ... });
+  agent.handleSocket(socket);
+  agent.on("disconnected", () => agent.destroy());
+});
+```
+
+## Constructor
+
+```typescript
+new VideoAgent(options: VideoAgentOptions)
+```
+
+Creates a new video agent instance with the specified configuration.
+
+### VideoAgentOptions
+
+<ParamField path="model" type="LanguageModel" required>
+  AI SDK Language Model for chat. **Must be a vision-enabled model** (e.g., `openai('gpt-4o')`, `anthropic('claude-3.5-sonnet')`, `google('gemini-1.5-pro')`) to process video frames
+</ParamField>
+
+<ParamField path="transcriptionModel" type="TranscriptionModel">
+  AI SDK Transcription Model for converting speech to text (e.g., `openai.transcription('whisper-1')`)
+</ParamField>
+
+<ParamField path="speechModel" type="SpeechModel">
+  AI SDK Speech Model for converting text to speech (e.g., `openai.speech('tts-1')`)
+</ParamField>
+
+<ParamField path="instructions" type="string" default="You are a helpful multimodal AI assistant...">
+  System instructions for the AI model. Default emphasizes multimodal capabilities
+</ParamField>
+
+<ParamField path="stopWhen" type="(event: StepEvent) => boolean" default="stepCountIs(5)">
+  Condition to stop the stream (from AI SDK)
+</ParamField>
+
+<ParamField path="tools" type="Record<string, Tool>">
+  AI SDK tools available to the agent
+</ParamField>
+
+<ParamField path="endpoint" type="string">
+  WebSocket server URL to connect to
+</ParamField>
+
+<ParamField path="voice" type="string">
+  Voice ID or name for speech synthesis
+</ParamField>
+
+<ParamField path="speechInstructions" type="string">
+  Instructions for speech synthesis behavior
+</ParamField>
+
+<ParamField path="outputFormat" type="string">
+  Audio output format (e.g., `"mp3"`, `"opus"`, `"pcm"`)
+</ParamField>
+
+<ParamField path="streamingSpeech" type="Partial<StreamingSpeechConfig>">
+  Configuration for streaming speech generation:
+  - `minChunkSize` (number, default: 50): Minimum characters before generating speech
+  - `maxChunkSize` (number, default: 200): Maximum characters per chunk
+  - `parallelGeneration` (boolean, default: true): Enable parallel TTS generation
+  - `maxParallelRequests` (number, default: 3): Maximum parallel TTS requests
+</ParamField>
+
+<ParamField path="history" type="Partial<HistoryConfig>">
+  Configuration for conversation history memory limits:
+  - `maxMessages` (number, default: 100): Maximum number of messages
+  - `maxTotalChars` (number, default: 0): Maximum total characters (0 = unlimited)
+</ParamField>
+
+<ParamField path="maxAudioInputSize" type="number" default="10485760">
+  Maximum audio input size in bytes (default: 10 MB)
+</ParamField>
+
+<ParamField path="maxFrameInputSize" type="number" default="5242880">
+  Maximum frame input size in bytes (default: 5 MB)
+</ParamField>
+
+<ParamField path="maxContextFrames" type="number" default="10">
+  Maximum frames to keep in context buffer for conversation history
+</ParamField>
+
+<ParamField path="sessionId" type="string">
+  Session ID for this video agent instance. Auto-generated if not provided
+</ParamField>
+
+### Example
+
+```typescript
+import { VideoAgent } from "@dimension-labs/voice-agent-ai";
+import { openai } from "@ai-sdk/openai";
+
+const agent = new VideoAgent({
+  model: openai("gpt-4o"), // Vision-enabled model
+  transcriptionModel: openai.transcription("whisper-1"),
+  speechModel: openai.speech("tts-1"),
+  instructions: "You are a helpful assistant that can see and hear.",
+  voice: "alloy",
+  maxContextFrames: 15,
+  maxFrameInputSize: 5 * 1024 * 1024, // 5 MB
+});
+```
+
+## Methods
+
+### Connection Management
+
+#### connect()
+
+```typescript
+async connect(url?: string): Promise<void>
+```
+
+Connect to a WebSocket server by URL.
+
+<ParamField path="url" type="string">
+  WebSocket URL to connect to. If not provided, uses the `endpoint` from constructor options or defaults to `"ws://localhost:8080"`
+</ParamField>
+
+<ResponseField name="void" type="Promise<void>">
+  Resolves when connection is established
+</ResponseField>
+
+**Example:**
+```typescript
+await agent.connect("ws://localhost:8080");
+```
+
+#### handleSocket()
+
+```typescript
+handleSocket(socket: WebSocket): void
+```
+
+Attach an existing WebSocket (server-side usage).
+
+<ParamField path="socket" type="WebSocket" required>
+  The WebSocket connection to attach
+</ParamField>
+
+**Example:**
+```typescript
+import { WebSocketServer } from "ws";
+
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on("connection", (socket) => {
+  const agent = new VideoAgent({ model, ... });
+  agent.handleSocket(socket);
+});
+```
+
+#### disconnect()
+
+```typescript
+disconnect(): void
+```
+
+Disconnect from WebSocket and stop all in-flight work.
+
+#### destroy()
+
+```typescript
+destroy(): void
+```
+
+Permanently destroy the agent, releasing all resources. Clears conversation history, frame context, and disconnects the WebSocket.
+
+### Input Methods
+
+#### sendText()
+
+```typescript
+async sendText(text: string): Promise<string>
+```
+
+Send text input for processing. If a frame has been received, it will be included in the context.
+
+<ParamField path="text" type="string" required>
+  The text input to process
+</ParamField>
+
+<ResponseField name="response" type="Promise<string>">
+  The full text response from the AI model
+</ResponseField>
+
+**Example:**
+```typescript
+const response = await agent.sendText("What do you see in this frame?");
+console.log(response);
+```
+
+#### sendAudio()
+
+```typescript
+async sendAudio(audioData: string): Promise<void>
+```
+
+Send base64-encoded audio data to be transcribed and processed.
+
+<ParamField path="audioData" type="string" required>
+  Base64-encoded audio data
+</ParamField>
+
+**Example:**
+```typescript
+const base64Audio = "...";
+await agent.sendAudio(base64Audio);
+```
+
+#### sendAudioBuffer()
+
+```typescript
+async sendAudioBuffer(audioBuffer: Buffer | Uint8Array): Promise<void>
+```
+
+Send raw audio buffer to be transcribed and processed.
+
+<ParamField path="audioBuffer" type="Buffer | Uint8Array" required>
+  Raw audio buffer
+</ParamField>
+
+**Example:**
+```typescript
+const audioBuffer = fs.readFileSync("audio.wav");
+await agent.sendAudioBuffer(audioBuffer);
+```
+
+### Video Frame Methods
+
+#### sendFrame()
+
+```typescript
+async sendFrame(
+  frameData: string,
+  query?: string,
+  options?: { width?: number; height?: number; format?: string }
+): Promise<string>
+```
+
+Send a video frame with optional text query for vision analysis.
+
+<ParamField path="frameData" type="string" required>
+  Base64-encoded frame image data
+</ParamField>
+
+<ParamField path="query" type="string">
+  Optional text query to ask about the frame
+</ParamField>
+
+<ParamField path="options.width" type="number" default="640">
+  Frame width in pixels
+</ParamField>
+
+<ParamField path="options.height" type="number" default="480">
+  Frame height in pixels
+</ParamField>
+
+<ParamField path="options.format" type="string" default="webp">
+  Image format (e.g., "webp", "jpeg", "png")
+</ParamField>
+
+<ResponseField name="response" type="Promise<string>">
+  The AI's response (empty if no query provided)
+</ResponseField>
+
+**Example:**
+```typescript
+const frameData = canvas.toDataURL("image/webp").split(",")[1];
+const response = await agent.sendFrame(
+  frameData,
+  "What objects do you see?",
+  { width: 1280, height: 720, format: "webp" }
+);
+```
+
+#### requestFrameCapture()
+
+```typescript
+requestFrameCapture(reason: FrameTriggerReason): void
+```
+
+Request the client to capture and send a frame.
+
+<ParamField path="reason" type="'scene_change' | 'user_request' | 'timer' | 'initial'" required>
+  Reason for requesting frame capture
+</ParamField>
+
+**Example:**
+```typescript
+agent.requestFrameCapture("user_request");
+```
+
+### Audio Processing
+
+#### transcribeAudio()
+
+```typescript
+async transcribeAudio(audioData: Buffer | Uint8Array): Promise<string>
+```
+
+Transcribe audio data to text using the configured transcription model.
+
+<ParamField path="audioData" type="Buffer | Uint8Array" required>
+  Raw audio data to transcribe
+</ParamField>
+
+<ResponseField name="transcript" type="Promise<string>">
+  The transcribed text
+</ResponseField>
+
+**Example:**
+```typescript
+const transcript = await agent.transcribeAudio(audioBuffer);
+```
+
+#### generateSpeechFromText()
+
+```typescript
+async generateSpeechFromText(
+  text: string,
+  abortSignal?: AbortSignal
+): Promise<Uint8Array>
+```
+
+Generate speech from text using the configured speech model.
+
+<ParamField path="text" type="string" required>
+  Text to convert to speech
+</ParamField>
+
+<ParamField path="abortSignal" type="AbortSignal">
+  Optional abort signal to cancel generation
+</ParamField>
+
+<ResponseField name="audio" type="Promise<Uint8Array>">
+  Generated audio data
+</ResponseField>
+
+**Example:**
+```typescript
+const audio = await agent.generateSpeechFromText("Hello there");
+```
+
+### Speech Control
+
+#### interruptSpeech()
+
+```typescript
+interruptSpeech(reason?: string): void
+```
+
+Interrupt ongoing speech generation and playback.
+
+<ParamField path="reason" type="string" default="interrupted">
+  Reason for interruption
+</ParamField>
+
+**Example:**
+```typescript
+agent.interruptSpeech("user_speaking");
+```
+
+#### interruptCurrentResponse()
+
+```typescript
+interruptCurrentResponse(reason?: string): void
+```
+
+Interrupt both the current LLM stream and ongoing speech.
+
+<ParamField path="reason" type="string" default="interrupted">
+  Reason for interruption
+</ParamField>
+
+**Example:**
+```typescript
+agent.interruptCurrentResponse("user_speaking");
+```
+
+### History & Context Management
+
+#### clearHistory()
+
+```typescript
+clearHistory(): void
+```
+
+Clear the conversation history and frame context buffer.
+
+**Example:**
+```typescript
+agent.clearHistory();
+```
+
+#### getHistory()
+
+```typescript
+getHistory(): ModelMessage[]
+```
+
+Get the current conversation history.
+
+<ResponseField name="history" type="ModelMessage[]">
+  Array of conversation messages
+</ResponseField>
+
+**Example:**
+```typescript
+const history = agent.getHistory();
+```
+
+#### setHistory()
+
+```typescript
+setHistory(history: ModelMessage[]): void
+```
+
+Set the conversation history (useful for restoring sessions).
+
+<ParamField path="history" type="ModelMessage[]" required>
+  Array of conversation messages to restore
+</ParamField>
+
+**Example:**
+```typescript
+const savedHistory = loadFromDatabase(userId);
+agent.setHistory(savedHistory);
+```
+
+#### getFrameContext()
+
+```typescript
+getFrameContext(): FrameContext[]
+```
+
+Get the current frame context buffer.
+
+<ResponseField name="frameContext" type="FrameContext[]">
+  Array of frame context objects with `sequence`, `timestamp`, `triggerReason`, and `frameHash`
+</ResponseField>
+
+**Example:**
+```typescript
+const frames = agent.getFrameContext();
+console.log(`${frames.length} frames in context`);
+```
+
+#### getSessionId()
+
+```typescript
+getSessionId(): string
+```
+
+Get the session ID for this agent instance.
+
+<ResponseField name="sessionId" type="string">
+  The session identifier
+</ResponseField>
+
+**Example:**
+```typescript
+const sessionId = agent.getSessionId();
+```
+
+### Configuration
+
+#### getConfig()
+
+```typescript
+getConfig(): VideoAgentConfig
+```
+
+Get the current video agent configuration.
+
+<ResponseField name="config" type="VideoAgentConfig">
+  Configuration object with `maxContextFrames`
+</ResponseField>
+
+**Example:**
+```typescript
+const config = agent.getConfig();
+console.log(`Max frames: ${config.maxContextFrames}`);
+```
+
+#### updateConfig()
+
+```typescript
+updateConfig(config: Partial<VideoAgentConfig>): void
+```
+
+Update the video agent configuration.
+
+<ParamField path="config" type="Partial<VideoAgentConfig>" required>
+  Configuration updates to apply
+</ParamField>
+
+**Example:**
+```typescript
+agent.updateConfig({ maxContextFrames: 20 });
+```
+
+### Tool Management
+
+#### registerTools()
+
+```typescript
+registerTools(tools: Record<string, Tool>): void
+```
+
+Register additional tools for the agent to use.
+
+<ParamField path="tools" type="Record<string, Tool>" required>
+  AI SDK tools to register
+</ParamField>
+
+**Example:**
+```typescript
+import { tool } from "ai";
+import { z } from "zod";
+
+agent.registerTools({
+  identifyObject: tool({
+    description: "Identify an object in the current frame",
+    parameters: z.object({
+      objectName: z.string(),
+    }),
+    execute: async ({ objectName }) => {
+      return { identified: true, confidence: 0.95 };
+    },
+  }),
+});
+```
+
+## Properties
+
+All properties are read-only.
+
+### connected
+
+```typescript
+get connected(): boolean
+```
+
+Whether the agent is currently connected to a WebSocket.
+
+### processing
+
+```typescript
+get processing(): boolean
+```
+
+Whether the agent is currently processing input.
+
+### speaking
+
+```typescript
+get speaking(): boolean
+```
+
+Whether the agent is currently speaking.
+
+### pendingSpeechChunks
+
+```typescript
+get pendingSpeechChunks(): number
+```
+
+Number of speech chunks pending generation or playback.
+
+### destroyed
+
+```typescript
+get destroyed(): boolean
+```
+
+Whether the agent has been permanently destroyed.
+
+### currentFrameSequence
+
+```typescript
+get currentFrameSequence(): number
+```
+
+The sequence number of the most recently processed frame.
+
+### hasVisualContext
+
+```typescript
+get hasVisualContext(): boolean
+```
+
+Whether the agent currently has visual context (a frame has been received).
+
+**Example:**
+```typescript
+if (agent.hasVisualContext) {
+  console.log("Agent can see");
+}
+```
+
+## Events
+
+The `VideoAgent` extends `EventEmitter` and emits all the same events as `VoiceAgent`, plus additional video-specific events.
+
+### Video-Specific Events
+
+#### frame_received
+
+Emitted when a video frame is received and processed.
+
+```typescript
+agent.on("frame_received", (data) => {
+  console.log(`Frame ${data.sequence} received:`, data.dimensions);
+  console.log(`Size: ${data.size} bytes, reason: ${data.triggerReason}`);
+});
+```
+
+#### frame_requested
+
+Emitted when the agent requests a frame capture from the client.
+
+```typescript
+agent.on("frame_requested", ({ reason }) => {
+  console.log(`Frame requested: ${reason}`);
+});
+```
+
+#### client_ready
+
+Emitted when the client signals it's ready for video streaming.
+
+```typescript
+agent.on("client_ready", (capabilities) => {
+  console.log("Client ready with capabilities:", capabilities);
+});
+```
+
+#### config_changed
+
+Emitted when the agent configuration is updated.
+
+```typescript
+agent.on("config_changed", (config) => {
+  console.log("Config updated:", config);
+});
+```
+
+### Connection Events
+
+Same as VoiceAgent: `connected`, `disconnected`, `error`, `warning`
+
+### Conversation Events
+
+Same as VoiceAgent: `text`, `text_delta`, `tool_call`, `tool_result`
+
+Note: The `text` event may include `hasImage: true` when video frames are involved:
+
+```typescript
+agent.on("text", ({ role, text, hasImage }) => {
+  if (hasImage) {
+    console.log(`${role} (with image): ${text}`);
+  }
+});
+```
+
+### Speech Events
+
+Same as VoiceAgent: `speech_start`, `speech_complete`, `speech_interrupted`, `speech_chunk_queued`, `audio_chunk`, `audio`
+
+### Transcription Events
+
+Same as VoiceAgent: `transcription`, `audio_received`
+
+### History Events
+
+Same as VoiceAgent: `history_cleared`, `history_trimmed`
+
+## Types
+
+### VideoAgentConfig
+
+```typescript
+interface VideoAgentConfig {
+  maxContextFrames: number;
+}
+```
+
+Backend configuration for video processing.
+
+### VideoFrame
+
+```typescript
+interface VideoFrame {
+  type: "video_frame";
+  sessionId: string;
+  sequence: number;
+  timestamp: number;
+  triggerReason: FrameTriggerReason;
+  previousFrameRef?: string;
+  image: {
+    data: string;        // Base64-encoded image
+    format: string;      // Image format (e.g., "webp")
+    width: number;       // Frame width in pixels
+    height: number;      // Frame height in pixels
+  };
+}
+```
+
+Video frame data structure sent to/from the client.
+
+### FrameContext
+
+```typescript
+interface FrameContext {
+  sequence: number;
+  timestamp: number;
+  triggerReason: FrameTriggerReason;
+  frameHash: string;
+  description?: string;
+}
+```
+
+Frame context for maintaining visual conversation history.
+
+### FrameTriggerReason
+
+```typescript
+type FrameTriggerReason = "scene_change" | "user_request" | "timer" | "initial";
+```
+
+Reason why a frame was captured.
+
+## Complete Example
+
+```typescript
+import { VideoAgent } from "@dimension-labs/voice-agent-ai";
+import { openai } from "@ai-sdk/openai";
+import { WebSocketServer } from "ws";
+
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on("connection", (socket) => {
+  const agent = new VideoAgent({
+    model: openai("gpt-4o"),
+    transcriptionModel: openai.transcription("whisper-1"),
+    speechModel: openai.speech("tts-1"),
+    instructions: "You are a helpful assistant that can see and hear.",
+    voice: "alloy",
+    maxContextFrames: 15,
+  });
+
+  agent.handleSocket(socket);
+
+  // Listen to events
+  agent.on("frame_received", (data) => {
+    console.log(`Frame ${data.sequence}: ${data.size} bytes`);
+  });
+
+  agent.on("text", ({ role, text, hasImage }) => {
+    console.log(`${role}${hasImage ? " (with frame)" : ""}: ${text}`);
+  });
+
+  agent.on("disconnected", () => {
+    console.log("Client disconnected");
+    agent.destroy();
+  });
+
+  agent.on("error", (error) => {
+    console.error("Agent error:", error);
+  });
+});
+
+console.log("Video agent server listening on port 8080");
+```

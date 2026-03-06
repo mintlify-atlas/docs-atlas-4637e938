@@ -1,0 +1,161 @@
+---
+title: Installation
+description: Set up the Voice Agent AI SDK in your Node.js project
+---
+
+Get started with Voice Agent AI SDK by installing the package and configuring your environment.
+
+## Prerequisites
+
+Before installing the SDK, ensure you have:
+
+- **Node.js 20 or higher** - The SDK uses modern JavaScript features
+- **pnpm** (recommended) or npm/yarn - Package manager of your choice
+- **OpenAI API key** - Required for LLM, transcription, and speech models
+
+<Note>
+While this SDK is optimized for OpenAI models, it works with any AI SDK compatible provider through the [Vercel AI SDK](https://sdk.vercel.ai/providers/ai-sdk-providers).
+</Note>
+
+## Install the Package
+
+Install `voice-agent-ai-sdk` and its peer dependencies:
+
+<CodeGroup>
+```bash npm
+npm install voice-agent-ai-sdk ai @ai-sdk/openai
+```
+
+```bash yarn
+yarn add voice-agent-ai-sdk ai @ai-sdk/openai
+```
+
+```bash pnpm
+pnpm add voice-agent-ai-sdk ai @ai-sdk/openai
+```
+</CodeGroup>
+
+### Package Details
+
+- `voice-agent-ai-sdk` - The core SDK (version 1.0.1+)
+- `ai` - Vercel AI SDK (peer dependency, version 6.0.0+)
+- `@ai-sdk/openai` - OpenAI provider for AI SDK
+
+<Note>
+The SDK also includes TypeScript definitions out of the box - no need to install separate `@types` packages.
+</Note>
+
+## Environment Setup
+
+Create a `.env` file in your project root to store API keys and configuration:
+
+```bash .env
+# Required: OpenAI API key for chat, transcription, and speech models
+OPENAI_API_KEY=sk-proj-...
+
+# Optional: WebSocket endpoint for voice transport
+# Only needed if you're using real-time voice features
+VOICE_WS_ENDPOINT=ws://localhost:8080
+```
+
+<Warning>
+**Security:** Never commit your `.env` file to version control. Add it to `.gitignore` to keep your API keys secure.
+</Warning>
+
+### Loading Environment Variables
+
+Load environment variables at the start of your application:
+
+```typescript
+import "dotenv/config";
+
+// Now process.env.OPENAI_API_KEY is available
+```
+
+Alternatively, install `dotenv` explicitly:
+
+<CodeGroup>
+```bash npm
+npm install dotenv
+```
+
+```bash yarn
+yarn add dotenv
+```
+
+```bash pnpm
+pnpm add dotenv
+```
+</CodeGroup>
+
+## Get Your OpenAI API Key
+
+If you don't have an OpenAI API key yet:
+
+1. Go to [platform.openai.com](https://platform.openai.com/)
+2. Sign in or create an account
+3. Navigate to **API Keys** in your account settings
+4. Click **Create new secret key**
+5. Copy the key and add it to your `.env` file
+
+<Note>
+Make sure you have credits in your OpenAI account. The SDK uses:
+- Chat models (e.g., `gpt-4o`) for text generation
+- `whisper-1` for audio transcription
+- Speech models (e.g., `gpt-4o-mini-tts`) for text-to-speech
+</Note>
+
+## Additional Dependencies (Optional)
+
+Depending on your use case, you may need:
+
+### For Tool Calling
+```bash
+pnpm add zod
+```
+
+The SDK uses [Zod](https://zod.dev/) for type-safe tool input schemas.
+
+### For WebSocket Server
+```bash
+pnpm add ws @types/ws
+```
+
+Needed if you're building a WebSocket server to handle voice connections.
+
+## Verify Installation
+
+Create a simple test file to verify everything is set up correctly:
+
+```typescript test.ts
+import "dotenv/config";
+import { VoiceAgent } from "voice-agent-ai-sdk";
+import { openai } from "@ai-sdk/openai";
+
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  instructions: "You are a helpful assistant.",
+});
+
+agent.on("text", ({ role, text }) => {
+  console.log(`${role}: ${text}`);
+});
+
+await agent.sendText("Hello!");
+
+console.log("✓ SDK is working!");
+```
+
+Run it:
+
+```bash
+node --loader tsx test.ts
+```
+
+If you see the assistant's response, you're all set!
+
+## Next Steps
+
+<Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+  Build your first voice agent with streaming text and speech
+</Card>

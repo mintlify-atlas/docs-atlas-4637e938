@@ -1,80 +1,343 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get started with Voice Agent AI SDK in under 5 minutes"
 ---
 
-## Get started in three steps
+Build your first voice-enabled AI agent with streaming text generation, real-time speech synthesis, and tool calling capabilities.
 
-Get your documentation site running locally and make your first customization.
+## What You'll Build
 
-### Step 1: Set up your local environment
+By the end of this guide, you'll have a working voice agent that:
+- Processes text input and streams responses
+- Calls tools (like weather lookup) during conversations
+- Generates streaming audio responses
+- Supports WebSocket connections for real-time voice interaction
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
 
-### Step 2: Deploy your changes
+<Step title="Install the SDK">
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+Install `voice-agent-ai-sdk` and the AI SDK with your preferred provider:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```bash
+npm install voice-agent-ai-sdk ai @ai-sdk/openai
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+The SDK is built on the [Vercel AI SDK](https://sdk.vercel.ai/), giving you access to multiple LLM providers, tools, and streaming capabilities.
 
-### Step 3: Go live
+</Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<Step title="Set up environment variables">
 
-## Next steps
+Create a `.env` file in your project root with your API keys:
 
-Now that you have your docs running, explore these key features:
+```bash
+OPENAI_API_KEY=your_openai_api_key
+VOICE_WS_ENDPOINT=ws://localhost:8080  # Optional for WebSocket mode
+```
+
+The `VOICE_WS_ENDPOINT` is only needed if you want real-time voice interaction over WebSocket. For text-only usage, you can skip it.
+
+</Step>
+
+<Step title="Define tools for your agent">
+
+Tools allow your agent to fetch real-time data or perform actions. Define them using the AI SDK's `tool` function:
+
+```typescript
+import { tool } from "ai";
+import { z } from "zod";
+
+const weatherTool = tool({
+  description: "Get the weather in a location",
+  inputSchema: z.object({
+    location: z.string().describe("The location to get the weather for"),
+  }),
+  execute: async ({ location }) => ({
+    location,
+    temperature: 72,
+    conditions: "sunny",
+  }),
+});
+
+const timeTool = tool({
+  description: "Get the current time",
+  inputSchema: z.object({}),
+  execute: async () => ({
+    time: new Date().toLocaleTimeString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }),
+});
+```
+
+These tools will be automatically called when the LLM determines they're needed to answer the user's query.
+
+</Step>
+
+<Step title="Initialize the VoiceAgent">
+
+Create a new `VoiceAgent` instance with your desired configuration:
+
+```typescript
+import "dotenv/config";
+import { VoiceAgent } from "voice-agent-ai-sdk";
+import { openai } from "@ai-sdk/openai";
+
+const agent = new VoiceAgent({
+  // Core models
+  model: openai("gpt-4o"),
+  transcriptionModel: openai.transcription("whisper-1"),
+  speechModel: openai.speech("gpt-4o-mini-tts"),
+  
+  // System instructions
+  instructions: `You are a helpful voice assistant. 
+Keep responses concise and conversational since they will be spoken aloud.
+Use tools when needed to provide accurate information.`,
+  
+  // Voice settings
+  voice: "alloy", // Options: alloy, echo, fable, onyx, nova, shimmer
+  speechInstructions: "Speak in a friendly, natural conversational tone.",
+  outputFormat: "mp3",
+  
+  // Streaming speech optimization
+  streamingSpeech: {
+    minChunkSize: 40,
+    maxChunkSize: 180,
+    parallelGeneration: true,
+    maxParallelRequests: 2,
+  },
+  
+  // WebSocket endpoint (optional)
+  endpoint: process.env.VOICE_WS_ENDPOINT,
+  
+  // Register your tools
+  tools: {
+    getWeather: weatherTool,
+    getTime: timeTool,
+  },
+});
+```
+
+The agent handles the entire voice interaction lifecycle: text streaming, tool calling, and speech synthesis.
+
+</Step>
+
+<Step title="Set up event listeners">
+
+Listen to events to track the agent's activity and handle responses:
+
+```typescript
+// User input and assistant responses
+agent.on("text", ({ role, text }) => {
+  const prefix = role === "user" ? "👤 User" : "🤖 Assistant";
+  console.log(`${prefix}: ${text}`);
+});
+
+// Real-time streaming text tokens
+agent.on("chunk:text_delta", ({ text }) => {
+  process.stdout.write(text);
+});
+
+// Tool execution events
+agent.on("chunk:tool_call", ({ toolName, input }) => {
+  console.log(`\n[Tool] Calling ${toolName}...`, JSON.stringify(input));
+});
+
+agent.on("tool_result", ({ name, result }) => {
+  console.log(`[Tool] ${name} result:`, JSON.stringify(result));
+});
+
+// Speech generation events
+agent.on("speech_start", ({ streaming }) => {
+  console.log(`[TTS] Speech started (streaming=${streaming})`);
+});
+
+agent.on("audio_chunk", ({ chunkId, format, uint8Array }) => {
+  console.log(`[Audio] Chunk #${chunkId} (${uint8Array.length} bytes, ${format})`);
+  // Save or stream the audio chunk
+});
+
+agent.on("speech_complete", () => {
+  console.log("[TTS] Speech generation complete");
+});
+
+// Error handling
+agent.on("error", (error) => {
+  console.error("[Error]", error.message);
+});
+```
+
+The SDK emits events at every stage of processing, giving you full visibility into the agent's behavior.
+
+</Step>
+
+<Step title="Send your first message">
+
+Send a text message to the agent and get a streaming response:
+
+```typescript
+try {
+  const response = await agent.sendText("What's the weather in San Francisco?");
+  console.log("Full response:", response);
+} catch (error) {
+  console.error("Error:", error);
+}
+```
+
+The agent will:
+1. Add your message to the conversation history
+2. Stream text tokens in real-time via `chunk:text_delta` events
+3. Detect that it needs weather data and call the `getWeather` tool
+4. Generate a response incorporating the tool result
+5. Convert the response to speech in parallel chunks
+6. Emit audio chunks as they're generated
+
+</Step>
+
+<Step title="Optional: Connect to WebSocket for real-time voice">
+
+For real-time voice interaction, connect to a WebSocket server:
+
+```typescript
+if (process.env.VOICE_WS_ENDPOINT) {
+  await agent.connect(process.env.VOICE_WS_ENDPOINT);
+  console.log("Agent connected and listening for audio input");
+  
+  // The agent will now listen for WebSocket messages like:
+  // { type: "transcript", text: "user speech text" }
+  // { type: "audio", data: "base64AudioData", format: "mp3" }
+}
+```
+
+The WebSocket protocol supports:
+- **Text transcripts** from browser speech recognition
+- **Audio data** for server-side transcription with Whisper
+- **Interruptions** to cancel ongoing responses (barge-in)
+
+</Step>
+
+</Steps>
+
+## Expected Output
+
+When you run the code above, you'll see output like this:
+
+```
+=== Voice Agent Demo ===
+Testing text-only mode (no WebSocket required)
+
+--- Test 1: Text Query ---
+👤 User: What's the weather in San Francisco?
+
+[Tool] Calling getWeather... {"location":"San Francisco"}
+[Tool] getWeather result: {"location":"San Francisco","temperature":72,"conditions":"sunny"}
+
+🤖 Assistant: The weather in San Francisco is currently sunny with a temperature of 72°F.
+
+[TTS] Speech started (streaming=true)
+[TTS] Queued chunk #0: The weather in San Francisco is currently...
+[Audio] Chunk #0 (24576 bytes, mp3)
+[TTS] Speech generation complete
+```
+
+## Complete Example
+
+Here's the full working example you can copy and run:
+
+```typescript
+import "dotenv/config";
+import { VoiceAgent } from "voice-agent-ai-sdk";
+import { tool } from "ai";
+import { z } from "zod";
+import { openai } from "@ai-sdk/openai";
+
+// Define tools
+const weatherTool = tool({
+  description: "Get the weather in a location",
+  inputSchema: z.object({
+    location: z.string().describe("The location to get the weather for"),
+  }),
+  execute: async ({ location }) => ({
+    location,
+    temperature: 72,
+    conditions: "sunny",
+  }),
+});
+
+// Initialize agent
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  transcriptionModel: openai.transcription("whisper-1"),
+  speechModel: openai.speech("gpt-4o-mini-tts"),
+  instructions: "You are a helpful voice assistant.",
+  voice: "alloy",
+  speechInstructions: "Speak in a friendly, natural conversational tone.",
+  outputFormat: "mp3",
+  streamingSpeech: {
+    minChunkSize: 40,
+    maxChunkSize: 180,
+    parallelGeneration: true,
+    maxParallelRequests: 2,
+  },
+  endpoint: process.env.VOICE_WS_ENDPOINT,
+  tools: { getWeather: weatherTool },
+});
+
+// Set up event listeners
+agent.on("text", ({ role, text }) => {
+  const prefix = role === "user" ? "👤" : "🤖";
+  console.log(prefix, text);
+});
+
+agent.on("chunk:text_delta", ({ text }) => process.stdout.write(text));
+
+agent.on("audio_chunk", ({ chunkId, format, uint8Array }) => {
+  console.log(`Audio chunk ${chunkId}: ${uint8Array.length} bytes`);
+});
+
+// Send message
+await agent.sendText("What's the weather in San Francisco?");
+
+// Optional: connect to WebSocket
+if (process.env.VOICE_WS_ENDPOINT) {
+  await agent.connect(process.env.VOICE_WS_ENDPOINT);
+}
+```
+
+## Next Steps
+
+Now that you have a working voice agent, explore more advanced features:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card
+    title="Configuration Guide"
+    icon="sliders"
+    href="/guides/configuration"
+  >
+    Fine-tune streaming speech, memory limits, and audio settings
+  </Card>
+  
+  <Card
+    title="Events Reference"
+    icon="bolt"
+    href="/api/events"
+  >
+    Complete list of all events and their payloads
+  </Card>
+  
+  <Card
+    title="VoiceAgent API"
+    icon="code"
+    href="/api/voice-agent"
+  >
+    Full API reference for methods and properties
+  </Card>
+  
+  <Card
+    title="Examples"
+    icon="book"
+    href="/examples/basic-usage"
+  >
+    More examples including WebSocket servers and browser clients
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

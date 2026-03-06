@@ -1,0 +1,382 @@
+---
+title: "Types & Interfaces"
+description: "Complete reference for all types and interfaces in the Voice Agent AI SDK"
+---
+
+## Core Interfaces
+
+### SpeechChunk
+
+Represents a chunk of text to be converted to speech during streaming text-to-speech generation.
+
+<ResponseField name="id" type="number" required>
+  Unique identifier for this speech chunk in the generation queue
+</ResponseField>
+
+<ResponseField name="text" type="string" required>
+  The text content to be converted to speech
+</ResponseField>
+
+<ResponseField name="audioPromise" type="Promise<Uint8Array | null>">
+  Promise that resolves to the generated audio data, or null if generation fails
+</ResponseField>
+
+```typescript
+interface SpeechChunk {
+  id: number;
+  text: string;
+  audioPromise?: Promise<Uint8Array | null>;
+}
+```
+
+### StreamingSpeechConfig
+
+Configuration for streaming speech behavior and parallel TTS generation.
+
+<ResponseField name="minChunkSize" type="number" required>
+  Minimum characters before generating speech for a chunk
+  
+  **Default:** `50`
+</ResponseField>
+
+<ResponseField name="maxChunkSize" type="number" required>
+  Maximum characters per chunk. Text will be split at sentence boundary before reaching this limit.
+  
+  **Default:** `200`
+</ResponseField>
+
+<ResponseField name="parallelGeneration" type="boolean" required>
+  Whether to enable parallel TTS generation for multiple chunks
+  
+  **Default:** `true`
+</ResponseField>
+
+<ResponseField name="maxParallelRequests" type="number" required>
+  Maximum number of parallel TTS requests allowed at once
+  
+  **Default:** `3`
+</ResponseField>
+
+```typescript
+interface StreamingSpeechConfig {
+  minChunkSize: number;
+  maxChunkSize: number;
+  parallelGeneration: boolean;
+  maxParallelRequests: number;
+}
+
+// Default configuration
+const DEFAULT_STREAMING_SPEECH_CONFIG: StreamingSpeechConfig = {
+  minChunkSize: 50,
+  maxChunkSize: 200,
+  parallelGeneration: true,
+  maxParallelRequests: 3,
+};
+```
+
+**Usage:**
+
+```typescript
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  streamingSpeech: {
+    minChunkSize: 40,
+    maxChunkSize: 180,
+    parallelGeneration: true,
+    maxParallelRequests: 2,
+  },
+});
+```
+
+### HistoryConfig
+
+Configuration for conversation history memory management and automatic trimming.
+
+<ResponseField name="maxMessages" type="number" required>
+  Maximum number of messages to keep in history. When exceeded, oldest messages are trimmed in pairs (user + assistant). Set to `0` for unlimited.
+  
+  **Default:** `100`
+</ResponseField>
+
+<ResponseField name="maxTotalChars" type="number" required>
+  Maximum total character count across all messages. When exceeded, oldest messages are trimmed. Set to `0` for unlimited.
+  
+  **Default:** `0` (unlimited)
+</ResponseField>
+
+```typescript
+interface HistoryConfig {
+  maxMessages: number;
+  maxTotalChars: number;
+}
+
+// Default configuration
+const DEFAULT_HISTORY_CONFIG: HistoryConfig = {
+  maxMessages: 100,
+  maxTotalChars: 0, // unlimited by default
+};
+```
+
+**Usage:**
+
+```typescript
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  history: {
+    maxMessages: 50,       // keep last 50 messages
+    maxTotalChars: 100_000, // trim when total exceeds 100k chars
+  },
+});
+```
+
+### StopWhenCondition
+
+Type for defining when the LLM stream should stop during multi-step tool execution.
+
+```typescript
+type StopWhenCondition = NonNullable<Parameters<typeof streamText>[0]["stopWhen"]>;
+```
+
+**Common values:**
+
+```typescript
+import { stepCountIs } from "ai";
+
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  stopWhen: stepCountIs(5), // Stop after 5 tool execution steps
+});
+```
+
+## Video Agent Types
+
+### VideoFrame
+
+Video frame data structure sent to/from the client for vision analysis.
+
+<ResponseField name="type" type="'video_frame'" required>
+  Message type identifier
+</ResponseField>
+
+<ResponseField name="sessionId" type="string" required>
+  Unique session identifier for this video agent instance
+</ResponseField>
+
+<ResponseField name="sequence" type="number" required>
+  Sequential frame number (increments with each frame)
+</ResponseField>
+
+<ResponseField name="timestamp" type="number" required>
+  Unix timestamp (milliseconds) when the frame was captured
+</ResponseField>
+
+<ResponseField name="triggerReason" type="FrameTriggerReason" required>
+  Reason why this frame was captured
+</ResponseField>
+
+<ResponseField name="previousFrameRef" type="string">
+  Hash reference to the previous frame for context
+</ResponseField>
+
+<ResponseField name="image" type="object" required>
+  Image data and metadata
+  
+  <ResponseField name="data" type="string" required>
+    Base64-encoded image data
+  </ResponseField>
+  
+  <ResponseField name="format" type="string" required>
+    Image format (e.g., "webp", "jpeg", "png")
+  </ResponseField>
+  
+  <ResponseField name="width" type="number" required>
+    Image width in pixels
+  </ResponseField>
+  
+  <ResponseField name="height" type="number" required>
+    Image height in pixels
+  </ResponseField>
+</ResponseField>
+
+```typescript
+interface VideoFrame {
+  type: "video_frame";
+  sessionId: string;
+  sequence: number;
+  timestamp: number;
+  triggerReason: FrameTriggerReason;
+  previousFrameRef?: string;
+  image: {
+    data: string;
+    format: string;
+    width: number;
+    height: number;
+  };
+}
+```
+
+### AudioData
+
+Audio data structure for WebSocket communication.
+
+<ResponseField name="type" type="'audio'" required>
+  Message type identifier
+</ResponseField>
+
+<ResponseField name="sessionId" type="string" required>
+  Unique session identifier
+</ResponseField>
+
+<ResponseField name="data" type="string" required>
+  Base64-encoded audio data
+</ResponseField>
+
+<ResponseField name="format" type="string" required>
+  Audio format (e.g., "mp3", "opus", "wav", "webm")
+</ResponseField>
+
+<ResponseField name="sampleRate" type="number">
+  Audio sample rate in Hz (e.g., 16000, 44100)
+</ResponseField>
+
+<ResponseField name="duration" type="number">
+  Audio duration in milliseconds
+</ResponseField>
+
+<ResponseField name="timestamp" type="number" required>
+  Unix timestamp (milliseconds) when the audio was recorded
+</ResponseField>
+
+```typescript
+interface AudioData {
+  type: "audio";
+  sessionId: string;
+  data: string;
+  format: string;
+  sampleRate?: number;
+  duration?: number;
+  timestamp: number;
+}
+```
+
+### VideoAgentConfig
+
+Backend configuration for video processing behavior.
+
+<ResponseField name="maxContextFrames" type="number" required>
+  Maximum frames to keep in context buffer for conversation history
+  
+  **Default:** `10`
+</ResponseField>
+
+```typescript
+interface VideoAgentConfig {
+  maxContextFrames: number;
+}
+
+const DEFAULT_VIDEO_AGENT_CONFIG: VideoAgentConfig = {
+  maxContextFrames: 10,
+};
+```
+
+**Usage:**
+
+```typescript
+const videoAgent = new VideoAgent({
+  model: openai("gpt-4o"), // Vision-enabled model required
+  maxContextFrames: 15,
+});
+
+// Update config at runtime
+videoAgent.updateConfig({ maxContextFrames: 20 });
+```
+
+### FrameContext
+
+Frame context for maintaining visual conversation history.
+
+<ResponseField name="sequence" type="number" required>
+  Frame sequence number
+</ResponseField>
+
+<ResponseField name="timestamp" type="number" required>
+  Unix timestamp (milliseconds) of frame capture
+</ResponseField>
+
+<ResponseField name="triggerReason" type="FrameTriggerReason" required>
+  Why this frame was captured
+</ResponseField>
+
+<ResponseField name="frameHash" type="string" required>
+  Unique hash identifying this frame
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Optional text description of the frame content
+</ResponseField>
+
+```typescript
+interface FrameContext {
+  sequence: number;
+  timestamp: number;
+  triggerReason: FrameTriggerReason;
+  frameHash: string;
+  description?: string;
+}
+```
+
+### FrameTriggerReason
+
+Enumeration of reasons why a frame was captured.
+
+```typescript
+type FrameTriggerReason = "scene_change" | "user_request" | "timer" | "initial";
+```
+
+<ResponseField name="scene_change" type="string">
+  Frame captured due to detected scene change in video
+</ResponseField>
+
+<ResponseField name="user_request" type="string">
+  Frame captured because user sent a query or request
+</ResponseField>
+
+<ResponseField name="timer" type="string">
+  Frame captured on a timer interval
+</ResponseField>
+
+<ResponseField name="initial" type="string">
+  First frame captured when video stream starts
+</ResponseField>
+
+## Constants
+
+### DEFAULT_MAX_AUDIO_SIZE
+
+Default maximum audio input size in bytes.
+
+```typescript
+const DEFAULT_MAX_AUDIO_SIZE = 10 * 1024 * 1024; // 10 MB
+```
+
+### DEFAULT_MAX_FRAME_SIZE
+
+Default maximum frame input size in bytes for video agents.
+
+```typescript
+const DEFAULT_MAX_FRAME_SIZE = 5 * 1024 * 1024; // 5 MB
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Events" icon="bolt" href="/api/events">
+    Learn about all events emitted by agents
+  </Card>
+  <Card title="VoiceAgent" icon="microphone" href="/api/voice-agent">
+    Voice agent class reference
+  </Card>
+  <Card title="VideoAgent" icon="video" href="/api/video-agent">
+    Video agent class reference
+  </Card>
+</CardGroup>

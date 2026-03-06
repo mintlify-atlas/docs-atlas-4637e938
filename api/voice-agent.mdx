@@ -1,0 +1,673 @@
+---
+title: "VoiceAgent"
+description: "A single-session voice agent that manages one WebSocket connection at a time"
+---
+
+## Overview
+
+The `VoiceAgent` class manages real-time voice conversations with AI models. Each instance holds its own conversation history, input queue, speech state, and WebSocket connection.
+
+**Important:** Each `VoiceAgent` instance is designed for **one user per instance**. To support multiple concurrent users, create a separate `VoiceAgent` for each connection:
+
+```typescript
+wss.on("connection", (socket) => {
+  const agent = new VoiceAgent({ model, ... });
+  agent.handleSocket(socket);
+  agent.on("disconnected", () => agent.destroy());
+});
+```
+
+Sharing a single instance across multiple users will cause conversation history cross-contamination, interleaved audio, and unpredictable behavior.
+
+## Constructor
+
+```typescript
+new VoiceAgent(options: VoiceAgentOptions)
+```
+
+Creates a new voice agent instance with the specified configuration.
+
+### VoiceAgentOptions
+
+<ParamField path="model" type="LanguageModel" required>
+  AI SDK Language Model for chat completions (e.g., `openai('gpt-4o')`, `anthropic('claude-3.5-sonnet')`)
+</ParamField>
+
+<ParamField path="transcriptionModel" type="TranscriptionModel">
+  AI SDK Transcription Model for converting speech to text (e.g., `openai.transcription('whisper-1')`)
+</ParamField>
+
+<ParamField path="speechModel" type="SpeechModel">
+  AI SDK Speech Model for converting text to speech (e.g., `openai.speech('tts-1')`)
+</ParamField>
+
+<ParamField path="instructions" type="string" default="You are a helpful voice assistant.">
+  System instructions for the AI model
+</ParamField>
+
+<ParamField path="stopWhen" type="(event: StepEvent) => boolean" default="stepCountIs(5)">
+  Condition to stop the stream (from AI SDK). Controls when multi-step tool calling should terminate
+</ParamField>
+
+<ParamField path="tools" type="Record<string, Tool>">
+  AI SDK tools available to the agent. Can be added later with `registerTools()`
+</ParamField>
+
+<ParamField path="endpoint" type="string">
+  WebSocket server URL to connect to (e.g., `"ws://localhost:8080"`)
+</ParamField>
+
+<ParamField path="voice" type="string">
+  Voice ID or name for speech synthesis (provider-specific)
+</ParamField>
+
+<ParamField path="speechInstructions" type="string">
+  Instructions for speech synthesis behavior
+</ParamField>
+
+<ParamField path="outputFormat" type="string">
+  Audio output format (e.g., `"mp3"`, `"opus"`, `"pcm"`)
+</ParamField>
+
+<ParamField path="streamingSpeech" type="Partial<StreamingSpeechConfig>">
+  Configuration for streaming speech generation:
+  - `minChunkSize` (number, default: 50): Minimum characters before generating speech for a chunk
+  - `maxChunkSize` (number, default: 200): Maximum characters per chunk (splits at sentence boundary)
+  - `parallelGeneration` (boolean, default: true): Whether to enable parallel TTS generation
+  - `maxParallelRequests` (number, default: 3): Maximum number of parallel TTS requests
+</ParamField>
+
+<ParamField path="history" type="Partial<HistoryConfig>">
+  Configuration for conversation history memory limits:
+  - `maxMessages` (number, default: 100): Maximum number of messages to keep. Set to 0 for unlimited
+  - `maxTotalChars` (number, default: 0): Maximum total characters across all messages. Set to 0 for unlimited
+</ParamField>
+
+<ParamField path="maxAudioInputSize" type="number" default="10485760">
+  Maximum audio input size in bytes (default: 10 MB)
+</ParamField>
+
+### Example
+
+```typescript
+import { VoiceAgent } from "@dimension-labs/voice-agent-ai";
+import { openai } from "@ai-sdk/openai";
+
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  transcriptionModel: openai.transcription("whisper-1"),
+  speechModel: openai.speech("tts-1"),
+  instructions: "You are a helpful assistant.",
+  voice: "alloy",
+  streamingSpeech: {
+    minChunkSize: 30,
+    maxChunkSize: 150,
+  },
+  history: {
+    maxMessages: 50,
+  },
+});
+```
+
+## Methods
+
+### Connection Management
+
+#### connect()
+
+```typescript
+async connect(url?: string): Promise<void>
+```
+
+Connect to a WebSocket server by URL.
+
+<ParamField path="url" type="string">
+  WebSocket URL to connect to. If not provided, uses the `endpoint` from constructor options or defaults to `"ws://localhost:8080"`
+</ParamField>
+
+<ResponseField name="void" type="Promise<void>">
+  Resolves when connection is established
+</ResponseField>
+
+**Example:**
+```typescript
+await agent.connect("ws://localhost:8080");
+```
+
+#### handleSocket()
+
+```typescript
+handleSocket(socket: WebSocket): void
+```
+
+Attach an existing WebSocket (server-side usage). Use this when handling incoming WebSocket connections in a server.
+
+<ParamField path="socket" type="WebSocket" required>
+  The WebSocket connection to attach
+</ParamField>
+
+**Example:**
+```typescript
+import { WebSocketServer } from "ws";
+
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on("connection", (socket) => {
+  const agent = new VoiceAgent({ model, ... });
+  agent.handleSocket(socket);
+});
+```
+
+#### disconnect()
+
+```typescript
+disconnect(): void
+```
+
+Disconnect from WebSocket and stop all in-flight work.
+
+#### destroy()
+
+```typescript
+destroy(): void
+```
+
+Permanently destroy the agent, releasing all resources. Clears conversation history, removes all event listeners, and disconnects the WebSocket.
+
+### Input Methods
+
+#### sendText()
+
+```typescript
+async sendText(text: string): Promise<string>
+```
+
+Send text input for processing (bypasses transcription). The text is queued and processed serially.
+
+<ParamField path="text" type="string" required>
+  The text input to process
+</ParamField>
+
+<ResponseField name="response" type="Promise<string>">
+  The full text response from the AI model
+</ResponseField>
+
+**Example:**
+```typescript
+const response = await agent.sendText("What's the weather today?");
+console.log(response);
+```
+
+#### sendAudio()
+
+```typescript
+async sendAudio(audioData: string): Promise<void>
+```
+
+Send base64-encoded audio data to be transcribed and processed.
+
+<ParamField path="audioData" type="string" required>
+  Base64-encoded audio data
+</ParamField>
+
+**Example:**
+```typescript
+const base64Audio = "...";
+await agent.sendAudio(base64Audio);
+```
+
+#### sendAudioBuffer()
+
+```typescript
+async sendAudioBuffer(audioBuffer: Buffer | Uint8Array): Promise<void>
+```
+
+Send raw audio buffer to be transcribed and processed.
+
+<ParamField path="audioBuffer" type="Buffer | Uint8Array" required>
+  Raw audio buffer
+</ParamField>
+
+**Example:**
+```typescript
+const audioBuffer = fs.readFileSync("audio.wav");
+await agent.sendAudioBuffer(audioBuffer);
+```
+
+### Audio Processing
+
+#### transcribeAudio()
+
+```typescript
+async transcribeAudio(audioData: Buffer | Uint8Array): Promise<string>
+```
+
+Transcribe audio data to text using the configured transcription model.
+
+<ParamField path="audioData" type="Buffer | Uint8Array" required>
+  Raw audio data to transcribe
+</ParamField>
+
+<ResponseField name="transcript" type="Promise<string>">
+  The transcribed text
+</ResponseField>
+
+**Example:**
+```typescript
+const transcript = await agent.transcribeAudio(audioBuffer);
+console.log("User said:", transcript);
+```
+
+#### generateAndSendSpeechFull()
+
+```typescript
+async generateAndSendSpeechFull(text: string): Promise<void>
+```
+
+Generate speech for full text at once (non-streaming fallback). Useful when you need to generate speech outside the normal streaming flow.
+
+<ParamField path="text" type="string" required>
+  Text to convert to speech
+</ParamField>
+
+**Example:**
+```typescript
+await agent.generateAndSendSpeechFull("Hello, how can I help you?");
+```
+
+### Speech Control
+
+#### interruptSpeech()
+
+```typescript
+interruptSpeech(reason?: string): void
+```
+
+Interrupt ongoing speech generation and playback (barge-in support). This stops any currently playing audio and clears the speech queue.
+
+<ParamField path="reason" type="string" default="interrupted">
+  Reason for interruption (used in events)
+</ParamField>
+
+**Example:**
+```typescript
+agent.interruptSpeech("user_speaking");
+```
+
+#### interruptCurrentResponse()
+
+```typescript
+interruptCurrentResponse(reason?: string): void
+```
+
+Interrupt both the current LLM stream and ongoing speech. This is more comprehensive than `interruptSpeech()` as it also stops the AI model from generating more text.
+
+<ParamField path="reason" type="string" default="interrupted">
+  Reason for interruption
+</ParamField>
+
+**Example:**
+```typescript
+agent.interruptCurrentResponse("user_speaking");
+```
+
+### History Management
+
+#### clearHistory()
+
+```typescript
+clearHistory(): void
+```
+
+Clear the conversation history. Useful for starting a new conversation with the same agent.
+
+**Example:**
+```typescript
+agent.clearHistory();
+```
+
+#### getHistory()
+
+```typescript
+getHistory(): ModelMessage[]
+```
+
+Get the current conversation history.
+
+<ResponseField name="history" type="ModelMessage[]">
+  Array of conversation messages with `role` and `content` fields
+</ResponseField>
+
+**Example:**
+```typescript
+const history = agent.getHistory();
+console.log(`Conversation has ${history.length} messages`);
+```
+
+#### setHistory()
+
+```typescript
+setHistory(history: ModelMessage[]): void
+```
+
+Set the conversation history (useful for restoring sessions).
+
+<ParamField path="history" type="ModelMessage[]" required>
+  Array of conversation messages to restore
+</ParamField>
+
+**Example:**
+```typescript
+// Save history
+const history = agent.getHistory();
+saveToDatabase(userId, history);
+
+// Restore later
+const savedHistory = loadFromDatabase(userId);
+agent.setHistory(savedHistory);
+```
+
+### Tool Management
+
+#### registerTools()
+
+```typescript
+registerTools(tools: Record<string, Tool>): void
+```
+
+Register additional tools for the agent to use. Tools are merged with existing tools.
+
+<ParamField path="tools" type="Record<string, Tool>" required>
+  AI SDK tools to register
+</ParamField>
+
+**Example:**
+```typescript
+import { tool } from "ai";
+import { z } from "zod";
+
+agent.registerTools({
+  getWeather: tool({
+    description: "Get the weather for a location",
+    parameters: z.object({
+      location: z.string(),
+    }),
+    execute: async ({ location }) => {
+      // Fetch weather data
+      return { temperature: 72, condition: "sunny" };
+    },
+  }),
+});
+```
+
+## Properties
+
+All properties are read-only.
+
+### connected
+
+```typescript
+get connected(): boolean
+```
+
+Whether the agent is currently connected to a WebSocket.
+
+**Example:**
+```typescript
+if (agent.connected) {
+  console.log("Agent is connected");
+}
+```
+
+### processing
+
+```typescript
+get processing(): boolean
+```
+
+Whether the agent is currently processing input (LLM is generating a response).
+
+**Example:**
+```typescript
+if (agent.processing) {
+  console.log("Agent is thinking...");
+}
+```
+
+### speaking
+
+```typescript
+get speaking(): boolean
+```
+
+Whether the agent is currently speaking (generating or playing audio).
+
+**Example:**
+```typescript
+if (agent.speaking) {
+  console.log("Agent is speaking...");
+}
+```
+
+### pendingSpeechChunks
+
+```typescript
+get pendingSpeechChunks(): number
+```
+
+Number of speech chunks pending generation or playback.
+
+**Example:**
+```typescript
+console.log(`${agent.pendingSpeechChunks} chunks in queue`);
+```
+
+### destroyed
+
+```typescript
+get destroyed(): boolean
+```
+
+Whether the agent has been permanently destroyed.
+
+**Example:**
+```typescript
+if (agent.destroyed) {
+  console.log("Agent has been destroyed");
+}
+```
+
+## Events
+
+The `VoiceAgent` extends `EventEmitter` and emits various events during operation. Listen to events using the standard `.on()` method.
+
+### Connection Events
+
+#### connected
+
+Emitted when WebSocket connection is established.
+
+```typescript
+agent.on("connected", () => {
+  console.log("Agent connected");
+});
+```
+
+#### disconnected
+
+Emitted when WebSocket connection is closed.
+
+```typescript
+agent.on("disconnected", () => {
+  console.log("Agent disconnected");
+  agent.destroy();
+});
+```
+
+#### error
+
+Emitted when an error occurs.
+
+```typescript
+agent.on("error", (error: Error) => {
+  console.error("Agent error:", error);
+});
+```
+
+#### warning
+
+Emitted for non-fatal warnings.
+
+```typescript
+agent.on("warning", (message: string) => {
+  console.warn("Warning:", message);
+});
+```
+
+### Conversation Events
+
+#### text
+
+Emitted when text is sent or received.
+
+```typescript
+agent.on("text", ({ role, text }) => {
+  console.log(`${role}: ${text}`);
+});
+```
+
+#### text_delta
+
+Emitted for each text chunk during streaming.
+
+```typescript
+agent.on("text_delta", ({ delta }) => {
+  process.stdout.write(delta);
+});
+```
+
+#### tool_call
+
+Emitted when the AI calls a tool.
+
+```typescript
+agent.on("tool_call", ({ name, args, toolCallId }) => {
+  console.log(`Tool called: ${name}`, args);
+});
+```
+
+#### tool_result
+
+Emitted when a tool execution completes.
+
+```typescript
+agent.on("tool_result", ({ name, result, toolCallId }) => {
+  console.log(`Tool result from ${name}:`, result);
+});
+```
+
+### Speech Events
+
+#### speech_start
+
+Emitted when speech generation starts.
+
+```typescript
+agent.on("speech_start", () => {
+  console.log("Started speaking");
+});
+```
+
+#### speech_complete
+
+Emitted when all speech has finished playing.
+
+```typescript
+agent.on("speech_complete", () => {
+  console.log("Finished speaking");
+});
+```
+
+#### speech_interrupted
+
+Emitted when speech is interrupted.
+
+```typescript
+agent.on("speech_interrupted", ({ reason }) => {
+  console.log(`Speech interrupted: ${reason}`);
+});
+```
+
+#### speech_chunk_queued
+
+Emitted when a speech chunk is added to the generation queue.
+
+```typescript
+agent.on("speech_chunk_queued", ({ chunkId, text }) => {
+  console.log(`Queued chunk ${chunkId}: ${text}`);
+});
+```
+
+#### audio_chunk
+
+Emitted when an audio chunk is generated.
+
+```typescript
+agent.on("audio_chunk", ({ chunkId, audio }) => {
+  console.log(`Generated audio chunk ${chunkId}`);
+});
+```
+
+#### audio
+
+Emitted when complete audio data is ready.
+
+```typescript
+agent.on("audio", ({ audio, format }) => {
+  console.log(`Audio ready: ${audio.length} bytes, format: ${format}`);
+});
+```
+
+### Transcription Events
+
+#### transcription
+
+Emitted when audio is transcribed to text.
+
+```typescript
+agent.on("transcription", ({ text, duration }) => {
+  console.log(`Transcribed: ${text}`);
+});
+```
+
+#### audio_received
+
+Emitted when audio input is received.
+
+```typescript
+agent.on("audio_received", ({ size, format }) => {
+  console.log(`Received audio: ${size} bytes, format: ${format}`);
+});
+```
+
+### History Events
+
+#### history_cleared
+
+Emitted when conversation history is cleared.
+
+```typescript
+agent.on("history_cleared", () => {
+  console.log("History cleared");
+});
+```
+
+#### history_trimmed
+
+Emitted when conversation history is automatically trimmed.
+
+```typescript
+agent.on("history_trimmed", ({ removedCount, reason }) => {
+  console.log(`Trimmed ${removedCount} messages: ${reason}`);
+});
+```

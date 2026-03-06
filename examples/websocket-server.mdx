@@ -1,0 +1,379 @@
+---
+title: "WebSocket Server"
+description: "Build a production-ready WebSocket server for real-time voice interactions"
+---
+
+This example shows how to build a WebSocket server that handles multiple concurrent voice agent connections, with one agent instance per client.
+
+## Complete Server Implementation
+
+```typescript
+import "dotenv/config";
+import { WebSocketServer } from "ws";
+import { VoiceAgent } from "voice-agent-ai";
+import { tool } from "ai";
+import { z } from "zod";
+import { openai } from "@ai-sdk/openai";
+
+const endpoint = process.env.VOICE_WS_ENDPOINT || "ws://localhost:8080";
+const url = new URL(endpoint);
+const port = Number(url.port || 8080);
+const host = url.hostname || "localhost";
+
+// Define your tools (reusable across all connections)
+const weatherTool = tool({
+    description: "Get the weather in a location",
+    inputSchema: z.object({
+        location: z.string().describe("The location to get the weather for"),
+    }),
+    execute: async ({ location }) => ({
+        location,
+        temperature: 72 + Math.floor(Math.random() * 21) - 10,
+        conditions: ["sunny", "cloudy", "rainy", "partly cloudy"][
+            Math.floor(Math.random() * 4)
+        ],
+    }),
+});
+
+const timeTool = tool({
+    description: "Get the current time",
+    inputSchema: z.object({}),
+    execute: async () => ({
+        time: new Date().toLocaleTimeString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
+});
+
+// Create WebSocket server
+const wss = new WebSocketServer({ port, host });
+
+wss.on("listening", () => {
+    console.log(`[ws-server] listening on ${endpoint}`);
+    console.log("[ws-server] Waiting for connections...\n");
+});
+
+wss.on("connection", (socket) => {
+    console.log("[ws-server] ✓ client connected");
+
+    // Create a fresh VoiceAgent per connection
+    const agent = new VoiceAgent({
+        model: openai("gpt-4o"),
+        transcriptionModel: openai.transcription("whisper-1"),
+        speechModel: openai.speech("gpt-4o-mini-tts"),
+        instructions: `You are a helpful voice assistant.
+Keep responses concise and conversational since they will be spoken aloud.
+Use tools when needed to provide accurate information.`,
+        voice: "alloy",
+        speechInstructions: "Speak in a friendly, natural conversational tone.",
+        outputFormat: "mp3",
+        streamingSpeech: {
+            minChunkSize: 20,          // Smaller chunks for faster streaming
+            maxChunkSize: 150,         // Not too large to ensure timely delivery
+            parallelGeneration: true,  // Generate audio chunks in parallel
+            maxParallelRequests: 3,    // Allow up to 3 concurrent TTS requests
+        },
+        tools: {
+            getWeather: weatherTool,
+            getTime: timeTool,
+        },
+    });
+
+    // Wire agent events to server logs
+    agent.on("text", (msg: { role: string; text: string }) => {
+        const prefix = msg.role === "user" ? "👤 User" : "🤖 Assistant";
+        console.log(`[ws-server] ${prefix}: ${msg.text}`);
+    });
+
+    agent.on("chunk:text_delta", ({ text }: { text: string }) => {
+        process.stdout.write(text);
+    });
+
+    agent.on("chunk:tool_call", ({ toolName }: { toolName: string }) => {
+        console.log(`\n[ws-server] 🛠️  Tool call: ${toolName}`);
+    });
+
+    agent.on("tool_result", ({ name, result }: { name: string; result: unknown }) => {
+        console.log(`[ws-server] 🛠️  Tool result (${name}):`, JSON.stringify(result));
+    });
+
+    agent.on("speech_start", () => console.log("[ws-server] 🔊 Speech started"));
+    agent.on("speech_complete", () => console.log("[ws-server] 🔊 Speech complete"));
+    agent.on("speech_interrupted", ({ reason }: { reason: string }) =>
+        console.log(`[ws-server] ⏸️  Speech interrupted: ${reason}`),
+    );
+
+    agent.on("audio_chunk", ({ chunkId, format, uint8Array }: { chunkId: number; format: string; uint8Array: Uint8Array }) => {
+        console.log(`[ws-server] 🔊 Audio chunk #${chunkId}: ${uint8Array.length} bytes (${format})`);
+    });
+
+    agent.on("transcription", ({ text, language }: { text: string; language?: string }) => {
+        console.log(`[ws-server] 📝 Transcription (${language || "unknown"}): ${text}`);
+    });
+
+    agent.on("audio_received", ({ size }: { size: number }) => {
+        console.log(`[ws-server] 🎤 Audio received: ${(size / 1024).toFixed(1)} KB`);
+    });
+
+    agent.on("warning", (msg: string) => {
+        console.log(`[ws-server] ⚠️  Warning: ${msg}`);
+    });
+
+    agent.on("error", (err: Error) => console.error("[ws-server] ❌ Error:", err.message));
+
+    agent.on("disconnected", () => {
+        // Permanently release all agent resources for this connection
+        agent.destroy();
+        console.log("[ws-server] ✗ client disconnected (agent destroyed)\n");
+    });
+
+    // Hand the accepted socket to the agent – this is the key line.
+    // The agent will listen for "transcript", "audio", "interrupt" messages
+    // and send back "text_delta", "audio_chunk", "response_complete", etc.
+    agent.handleSocket(socket);
+});
+
+// Graceful shutdown
+process.on("SIGINT", () => {
+    console.log("\n[ws-server] Shutting down...");
+    wss.close(() => {
+        console.log("[ws-server] Server closed");
+        process.exit(0);
+    });
+});
+
+export { wss };
+```
+
+## Key Architecture Concepts
+
+### One Agent Per Connection
+
+**Critical:** Each client connection must have its own `VoiceAgent` instance:
+
+```typescript
+wss.on("connection", (socket) => {
+    // ✅ Correct: New agent for each connection
+    const agent = new VoiceAgent({ ... });
+    agent.handleSocket(socket);
+    
+    agent.on("disconnected", () => {
+        agent.destroy(); // Clean up resources
+    });
+});
+```
+
+❌ **Never do this:**
+
+```typescript
+// ❌ Wrong: Shared agent causes conversation cross-contamination
+const agent = new VoiceAgent({ ... });
+
+wss.on("connection", (socket) => {
+    agent.handleSocket(socket); // BAD: Multiple users share history
+});
+```
+
+### Resource Cleanup
+
+Always call `agent.destroy()` when a connection closes to:
+- Clear conversation history
+- Cancel pending speech generation
+- Release memory and event listeners
+- Prevent memory leaks
+
+```typescript
+agent.on("disconnected", () => {
+    agent.destroy();
+    console.log("Agent destroyed - all resources released");
+});
+```
+
+## Client WebSocket Messages
+
+Your client should send messages in these formats:
+
+### Text Transcript
+
+```javascript
+socket.send(JSON.stringify({
+    type: "transcript",
+    text: "What's the weather like today?"
+}));
+```
+
+### Audio Data
+
+```javascript
+// Send base64 encoded audio
+socket.send(JSON.stringify({
+    type: "audio",
+    data: audioBase64String,
+    format: "mp3" // or "wav", "webm", etc.
+}));
+```
+
+### Interrupt Speech (Barge-in)
+
+```javascript
+socket.send(JSON.stringify({
+    type: "interrupt",
+    reason: "user_speaking"
+}));
+```
+
+## Server Responses
+
+The agent automatically sends these message types to clients:
+
+### Text Delta (Streaming)
+
+```json
+{
+    "type": "text_delta",
+    "text": "The weather",
+    "messageId": "msg_123"
+}
+```
+
+### Audio Chunk
+
+```json
+{
+    "type": "audio_chunk",
+    "chunkId": 1,
+    "data": "base64_encoded_audio",
+    "format": "mp3"
+}
+```
+
+### Tool Execution
+
+```json
+{
+    "type": "tool_result",
+    "name": "getWeather",
+    "result": { "temperature": 75, "conditions": "sunny" }
+}
+```
+
+### Response Complete
+
+```json
+{
+    "type": "response_complete",
+    "messageId": "msg_123"
+}
+```
+
+## Running the Server
+
+### Setup
+
+```bash
+npm install ws voice-agent-ai ai @ai-sdk/openai zod dotenv
+```
+
+### Environment Variables
+
+```bash
+# .env
+OPENAI_API_KEY=your_api_key_here
+VOICE_WS_ENDPOINT=ws://localhost:8080
+```
+
+### Start Server
+
+```bash
+ts-node ws-server.ts
+```
+
+Expected output:
+
+```
+[ws-server] listening on ws://localhost:8080
+[ws-server] Waiting for connections...
+
+[ws-server] ✓ client connected
+[ws-server] 🎤 Audio received: 45.3 KB
+[ws-server] 📝 Transcription (en): What's the weather in San Francisco?
+[ws-server] 👤 User: What's the weather in San Francisco?
+[ws-server] 🛠️  Tool call: getWeather
+[ws-server] 🛠️  Tool result (getWeather): {"location":"San Francisco","temperature":72,"conditions":"sunny"}
+[ws-server] 🤖 Assistant: The weather in San Francisco is currently sunny with a temperature of 72°F.
+[ws-server] 🔊 Speech started
+[ws-server] 🔊 Audio chunk #1: 4523 bytes (mp3)
+[ws-server] 🔊 Speech complete
+```
+
+## Production Considerations
+
+### Authentication
+
+Add authentication before accepting connections:
+
+```typescript
+wss.on("connection", async (socket, request) => {
+    const token = new URL(request.url, "http://localhost").searchParams.get("token");
+    
+    if (!await validateToken(token)) {
+        socket.close(1008, "Unauthorized");
+        return;
+    }
+    
+    // Continue with agent setup...
+});
+```
+
+### Rate Limiting
+
+Limit requests per connection:
+
+```typescript
+const rateLimitMap = new Map();
+
+wss.on("connection", (socket) => {
+    const clientId = getClientId(socket);
+    rateLimitMap.set(clientId, { count: 0, resetAt: Date.now() + 60000 });
+    
+    // Implement rate limit checks in message handler
+});
+```
+
+### Error Recovery
+
+```typescript
+agent.on("error", (error) => {
+    console.error("Agent error:", error);
+    
+    // Notify client
+    socket.send(JSON.stringify({
+        type: "error",
+        message: "An error occurred. Please try again."
+    }));
+    
+    // Don't crash - keep connection alive
+});
+```
+
+### Monitoring
+
+```typescript
+// Track active connections
+let activeConnections = 0;
+
+wss.on("connection", (socket) => {
+    activeConnections++;
+    console.log(`Active connections: ${activeConnections}`);
+    
+    agent.on("disconnected", () => {
+        activeConnections--;
+        console.log(`Active connections: ${activeConnections}`);
+    });
+});
+```
+
+## Next Steps
+
+- [Video Agent Usage](/examples/video-agent-usage) - Add vision capabilities
+- [Custom Tools](/examples/custom-tools) - Build advanced tool integrations
+- [API Reference](/api/voice-agent) - Full VoiceAgent API documentation

@@ -1,0 +1,126 @@
+---
+title: Changelog
+description: All notable changes to the Voice Agent AI SDK
+icon: "clock-rotate-left"
+---
+
+All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
+
+## Version 0.1.0
+
+<sub>Released July 15, 2025</sub>
+
+### Added
+
+#### Conversation History Limits
+New `history` option with `maxMessages` (default 100) and `maxTotalChars` (default unlimited) to prevent unbounded memory growth. Oldest messages are trimmed in pairs to preserve user/assistant turn structure.
+
+```typescript
+const agent = new VoiceAgent({
+  history: {
+    maxMessages: 50,
+    maxTotalChars: 100_000,
+  },
+});
+```
+
+Emits `history_trimmed` event when messages are evicted.
+
+#### Audio Input Size Validation
+New `maxAudioInputSize` option (default 10 MB). Oversized or empty audio payloads are rejected early with an `error` / `warning` event instead of being forwarded to the transcription model.
+
+```typescript
+const agent = new VoiceAgent({
+  maxAudioInputSize: 5 * 1024 * 1024, // 5 MB limit
+});
+```
+
+#### Serial Input Queue
+`sendText()`, WebSocket `transcript` messages, and transcribed audio are now queued and processed one at a time. This prevents race conditions where concurrent calls could corrupt `conversationHistory` or interleave streaming output.
+
+#### LLM Stream Cancellation
+An `AbortController` is now threaded into `streamText()` via `abortSignal`. Barge-in, disconnect, and explicit interrupts abort the LLM stream immediately (saving tokens) instead of only cancelling TTS.
+
+#### `interruptCurrentResponse(reason)`
+New public method that aborts both the LLM stream **and** ongoing speech in a single call. WebSocket barge-in (`transcript` / `audio` / `interrupt` messages) now uses this instead of `interruptSpeech()` alone.
+
+```typescript
+// Interrupt both LLM generation and speech
+agent.interruptCurrentResponse("user_speaking");
+
+// Old method: only interrupts speech, LLM keeps running
+agent.interruptSpeech("user_speaking");
+```
+
+#### `destroy()` Method
+Permanently tears down the agent, releasing the socket, clearing history and tools, and removing all event listeners. A `destroyed` getter is also exposed. Any subsequent method call throws.
+
+```typescript
+agent.destroy();
+console.log(agent.destroyed); // true
+```
+
+#### `history_trimmed` Event
+Emitted with `{ removedCount, reason }` when the sliding-window trims old messages.
+
+```typescript
+agent.on("history_trimmed", ({ removedCount, reason }) => {
+  console.log(`Trimmed ${removedCount} messages: ${reason}`);
+});
+```
+
+#### Input Validation
+`sendText("")` now throws, and incoming WebSocket `transcript` / `audio` messages are validated before processing.
+
+### Changed
+
+#### `disconnect()` is Now Full Cleanup
+Aborts in-flight LLM and TTS streams, clears the speech queue, rejects pending queued inputs, and removes socket listeners before closing. Previously it only called `socket.close()`.
+
+#### `connect()` and `handleSocket()` are Idempotent
+Calling either when a socket is already attached will cleanly tear down the old connection first instead of leaking it.
+
+#### `sendWebSocketMessage()` is Resilient
+Checks `socket.readyState` and wraps `send()` in a try/catch so a socket that closes mid-send does not throw an unhandled exception.
+
+#### Speech Queue Completion Uses Promise
+`processUserInput` now awaits a `speechQueueDonePromise` instead of busy-wait polling (`while (queue.length) { await sleep(100) }`), reducing CPU waste and eliminating a race window.
+
+#### `interruptSpeech()` Resolves Speech-Done Promise
+So `processUserInput` can proceed immediately after a barge-in instead of potentially hanging.
+
+#### WebSocket Message Handler Uses `if/else if`
+Prevents a single message from accidentally matching multiple type branches.
+
+#### Chunk ID Wraps at `Number.MAX_SAFE_INTEGER`
+Avoids unbounded counter growth in very long-running sessions.
+
+#### `processUserInput` Catch Block Cleans Up Speech State
+On stream error, the pending text buffer is cleared and any in-progress speech is interrupted, so the agent does not get stuck in a broken state.
+
+#### WebSocket Close Handler Calls `cleanupOnDisconnect()`
+Aborts LLM + TTS, clears queues, and rejects pending input promises.
+
+### Fixed
+
+- Typo in JSDoc: `"Process text deltra"` → `"Process text delta"`
+
+---
+
+## Version 0.0.1
+
+<sub>Released July 14, 2025</sub>
+
+### Added
+
+- **Initial release** of Voice Agent AI SDK
+- Streaming text generation via AI SDK `streamText`
+- Multi-step tool calling with `stopWhen`
+- Chunked streaming TTS with parallel generation and barge-in support
+- Audio transcription via AI SDK `experimental_transcribe`
+- WebSocket transport with full stream/tool/speech lifecycle events
+- Browser voice client example (`example/voice-client.html`)
+
+<Note>
+This was the initial release of the SDK, providing the foundation for voice-enabled AI agents with streaming capabilities.
+</Note>

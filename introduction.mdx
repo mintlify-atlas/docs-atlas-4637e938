@@ -1,0 +1,107 @@
+---
+title: Introduction
+description: Build intelligent voice and text agents with streaming AI capabilities
+---
+
+The Voice Agent AI SDK is a powerful, production-ready library for building streaming voice and text agents powered by the [Vercel AI SDK](https://sdk.vercel.ai/). It provides everything you need to create real-time conversational AI applications with low-latency audio responses.
+
+## What is Voice Agent AI SDK?
+
+Voice Agent AI SDK is an npm package that combines:
+- **Streaming text generation** via AI SDK with multi-step tool calling
+- **Real-time speech synthesis** with chunked streaming for low time-to-first-audio
+- **Audio transcription** using models like OpenAI Whisper
+- **WebSocket transport** for bidirectional voice communication
+- **Barge-in support** for natural conversation interruptions
+
+<Note>
+This SDK is published to npm as `voice-agent-ai-sdk` and can be used in any Node.js 20+ environment.
+</Note>
+
+## Who is this for?
+
+This SDK is ideal for developers building:
+- Voice-enabled chatbots and virtual assistants
+- Customer service automation with voice support
+- Interactive voice response (IVR) systems
+- Real-time AI voice applications with tool calling
+- Server-side text-to-speech streaming services
+
+## Key Capabilities
+
+<CardGroup cols={2}>
+  <Card title="Streaming Text & Speech" icon="wave-pulse">
+    Text is split at sentence boundaries and converted to speech in parallel as the LLM streams, providing ultra-low latency to first audio.
+  </Card>
+  
+  <Card title="Tool Calling" icon="wrench">
+    Full support for AI SDK tools with multi-step execution. Define functions the agent can call to fetch data, perform actions, or integrate with external APIs.
+  </Card>
+  
+  <Card title="Barge-in & Interruption" icon="hand">
+    User speech automatically cancels in-flight LLM streams and pending TTS, saving tokens and reducing latency for natural conversation flow.
+  </Card>
+  
+  <Card title="Memory Management" icon="brain">
+    Configurable sliding-window conversation history with `maxMessages` and `maxTotalChars` limits, plus audio input size constraints.
+  </Card>
+  
+  <Card title="WebSocket Transport" icon="signal-stream">
+    Built-in WebSocket protocol with stream, tool, and speech lifecycle events. Also works without WebSocket for text-only or server-side usage.
+  </Card>
+  
+  <Card title="Graceful Lifecycle" icon="rotate">
+    `disconnect()` aborts all in-flight work cleanly; `destroy()` permanently releases every resource. Serial request queue prevents race conditions.
+  </Card>
+</CardGroup>
+
+## Architecture
+
+The SDK is designed around a single `VoiceAgent` instance per user session:
+
+```typescript
+import { VoiceAgent } from "voice-agent-ai-sdk";
+import { openai } from "@ai-sdk/openai";
+
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  transcriptionModel: openai.transcription("whisper-1"),
+  speechModel: openai.speech("gpt-4o-mini-tts"),
+  instructions: "You are a helpful voice assistant.",
+});
+
+// Listen to events
+agent.on("text", ({ role, text }) => {
+  console.log(`${role}: ${text}`);
+});
+
+// Send text or audio
+await agent.sendText("Hello!");
+```
+
+<Warning>
+**Important:** Each `VoiceAgent` instance holds its own conversation history, input queue, and WebSocket connection. Create a separate instance for each user to avoid conversation cross-contamination.
+</Warning>
+
+## Use Cases
+
+### Text-Only Mode
+Use `sendText()` directly for server-side applications, chatbots, or any scenario where you don't need real-time audio streaming.
+
+### WebSocket Voice Mode
+Connect to a WebSocket endpoint with `connect()` or `handleSocket()` to enable bidirectional voice communication with automatic transcription and speech synthesis.
+
+### Hybrid Applications
+Combine both modes: use text input for some interactions and audio for others. The agent seamlessly handles both input types.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the SDK and set up your development environment
+  </Card>
+  
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first voice agent in 5 minutes
+  </Card>
+</CardGroup>

@@ -1,0 +1,493 @@
+---
+title: "Custom Tools"
+description: "Create powerful tool integrations for your voice and video agents"
+---
+
+Tools allow your agent to take actions, fetch real-time data, and integrate with external systems. This guide shows you how to create and use custom tools effectively.
+
+## Basic Tool Structure
+
+Tools are defined using the AI SDK's `tool()` function with Zod schemas:
+
+```typescript
+import { tool } from "ai";
+import { z } from "zod";
+
+const myTool = tool({
+    description: "Clear description of what this tool does",
+    inputSchema: z.object({
+        param1: z.string().describe("Description of parameter 1"),
+        param2: z.number().optional().describe("Optional parameter 2"),
+    }),
+    execute: async ({ param1, param2 }) => {
+        // Tool implementation
+        const result = await performAction(param1, param2);
+        return result;
+    },
+});
+```
+
+## Complete Examples
+
+### Weather Tool
+
+```typescript
+const weatherTool = tool({
+    description: "Get current weather conditions for a location",
+    inputSchema: z.object({
+        location: z.string().describe("City name or address"),
+        units: z.enum(["celsius", "fahrenheit"]).optional().describe("Temperature units"),
+    }),
+    execute: async ({ location, units = "fahrenheit" }) => {
+        // Real implementation would call a weather API
+        const response = await fetch(
+            `https://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=${location}`
+        );
+        const data = await response.json();
+        
+        return {
+            location: data.location.name,
+            temperature: units === "celsius" ? data.current.temp_c : data.current.temp_f,
+            conditions: data.current.condition.text,
+            humidity: data.current.humidity,
+            windSpeed: data.current.wind_mph,
+            units,
+        };
+    },
+});
+```
+
+### Database Query Tool
+
+```typescript
+import { db } from "./database";
+
+const searchCustomersTool = tool({
+    description: "Search for customers by name, email, or phone number",
+    inputSchema: z.object({
+        query: z.string().describe("Search query (name, email, or phone)"),
+        limit: z.number().min(1).max(50).optional().describe("Maximum results to return"),
+    }),
+    execute: async ({ query, limit = 10 }) => {
+        const customers = await db.customers.findMany({
+            where: {
+                OR: [
+                    { name: { contains: query, mode: "insensitive" } },
+                    { email: { contains: query, mode: "insensitive" } },
+                    { phone: { contains: query } },
+                ],
+            },
+            take: limit,
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                phone: true,
+                createdAt: true,
+            },
+        });
+        
+        return {
+            found: customers.length,
+            customers,
+        };
+    },
+});
+```
+
+### Calendar Tool
+
+```typescript
+import { google } from "googleapis";
+
+const scheduleEventTool = tool({
+    description: "Schedule a calendar event",
+    inputSchema: z.object({
+        title: z.string().describe("Event title"),
+        startTime: z.string().describe("Start time in ISO 8601 format"),
+        duration: z.number().describe("Duration in minutes"),
+        attendees: z.array(z.string().email()).optional().describe("Email addresses of attendees"),
+    }),
+    execute: async ({ title, startTime, duration, attendees = [] }) => {
+        const calendar = google.calendar({ version: "v3", auth });
+        
+        const endTime = new Date(
+            new Date(startTime).getTime() + duration * 60000
+        ).toISOString();
+        
+        const event = await calendar.events.insert({
+            calendarId: "primary",
+            requestBody: {
+                summary: title,
+                start: { dateTime: startTime },
+                end: { dateTime: endTime },
+                attendees: attendees.map(email => ({ email })),
+            },
+        });
+        
+        return {
+            success: true,
+            eventId: event.data.id,
+            eventLink: event.data.htmlLink,
+            startTime,
+            endTime,
+        };
+    },
+});
+```
+
+### API Integration Tool
+
+```typescript
+const sendSlackMessageTool = tool({
+    description: "Send a message to a Slack channel",
+    inputSchema: z.object({
+        channel: z.string().describe("Channel name (e.g., #general)"),
+        message: z.string().describe("Message content"),
+        urgent: z.boolean().optional().describe("Whether to send as urgent notification"),
+    }),
+    execute: async ({ channel, message, urgent = false }) => {
+        const response = await fetch("https://slack.com/api/chat.postMessage", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                channel,
+                text: urgent ? `🚨 ${message}` : message,
+                ...(urgent && { priority: "high" }),
+            }),
+        });
+        
+        const data = await response.json();
+        
+        if (!data.ok) {
+            throw new Error(`Slack API error: ${data.error}`);
+        }
+        
+        return {
+            success: true,
+            channel: data.channel,
+            timestamp: data.ts,
+        };
+    },
+});
+```
+
+### File System Tool
+
+```typescript
+import { readFile, writeFile } from "fs/promises";
+import { join } from "path";
+
+const readNoteTool = tool({
+    description: "Read the contents of a saved note",
+    inputSchema: z.object({
+        noteName: z.string().describe("Name of the note to read"),
+    }),
+    execute: async ({ noteName }) => {
+        const filePath = join(__dirname, "notes", `${noteName}.txt`);
+        
+        try {
+            const content = await readFile(filePath, "utf-8");
+            return {
+                success: true,
+                noteName,
+                content,
+                length: content.length,
+            };
+        } catch (error) {
+            return {
+                success: false,
+                error: "Note not found",
+                noteName,
+            };
+        }
+    },
+});
+
+const saveNoteTool = tool({
+    description: "Save a note to the file system",
+    inputSchema: z.object({
+        noteName: z.string().describe("Name for the note"),
+        content: z.string().describe("Content to save"),
+    }),
+    execute: async ({ noteName, content }) => {
+        const filePath = join(__dirname, "notes", `${noteName}.txt`);
+        await writeFile(filePath, content, "utf-8");
+        
+        return {
+            success: true,
+            noteName,
+            savedAt: new Date().toISOString(),
+            size: content.length,
+        };
+    },
+});
+```
+
+## Registering Tools
+
+### During Initialization
+
+```typescript
+const agent = new VoiceAgent({
+    model: openai("gpt-4o"),
+    tools: {
+        getWeather: weatherTool,
+        searchCustomers: searchCustomersTool,
+        scheduleEvent: scheduleEventTool,
+        sendSlackMessage: sendSlackMessageTool,
+        readNote: readNoteTool,
+        saveNote: saveNoteTool,
+    },
+    // ...
+});
+```
+
+### After Initialization
+
+```typescript
+// Add more tools dynamically
+agent.registerTools({
+    newTool1: tool1,
+    newTool2: tool2,
+});
+```
+
+## Handling Tool Events
+
+### Stream-Level Events
+
+These fire as the LLM streams tool calls:
+
+```typescript
+// Fires when LLM decides to call a tool
+agent.on("chunk:tool_call", ({ toolName, input }) => {
+    console.log(`🛠️  Calling ${toolName}`);
+    console.log(`Input:`, JSON.stringify(input, null, 2));
+});
+
+// Fires when tool execution completes
+agent.on("chunk:tool_result", ({ name, result }) => {
+    console.log(`✅ ${name} completed`);
+    console.log(`Result:`, JSON.stringify(result, null, 2));
+});
+```
+
+### Response-Level Events
+
+These fire after the entire response completes:
+
+```typescript
+// Fires with all tool results at the end
+agent.on("tool_result", ({ name, toolCallId, result }) => {
+    console.log(`Tool: ${name}`);
+    console.log(`Call ID: ${toolCallId}`);
+    console.log(`Result:`, result);
+    
+    // Store in database, log to analytics, etc.
+    analytics.track("tool_executed", {
+        toolName: name,
+        callId: toolCallId,
+        success: result.success !== false,
+    });
+});
+```
+
+## Multi-Step Tool Chains
+
+The agent can automatically chain multiple tools together:
+
+```typescript
+const agent = new VoiceAgent({
+    model: openai("gpt-4o"),
+    tools: {
+        searchCustomers: searchCustomersTool,
+        sendSlackMessage: sendSlackMessageTool,
+        scheduleEvent: scheduleEventTool,
+    },
+    instructions: `You are a helpful assistant. 
+Use tools when needed and chain them together to complete tasks.`,
+});
+
+// User: "Find customers named John and notify the sales team"
+// Agent will:
+// 1. Call searchCustomers({ query: "John" })
+// 2. Analyze results
+// 3. Call sendSlackMessage({ channel: "#sales", message: "Found 3 customers named John..." })
+```
+
+### Tracking Multi-Step Execution
+
+```typescript
+const toolCalls: Array<{ name: string; input: any; result: any }> = [];
+
+agent.on("chunk:tool_call", ({ toolName, input }) => {
+    toolCalls.push({ name: toolName, input, result: null });
+});
+
+agent.on("chunk:tool_result", ({ name, result }) => {
+    const call = toolCalls.find(c => c.name === name && c.result === null);
+    if (call) call.result = result;
+});
+
+agent.on("text", ({ role, text }) => {
+    if (role === "assistant") {
+        console.log(`\n=== Tool Chain Summary ===");
+        console.log(`Steps executed: ${toolCalls.length}`);
+        toolCalls.forEach((call, i) => {
+            console.log(`${i + 1}. ${call.name}`);
+            console.log(`   Input: ${JSON.stringify(call.input)}`);
+            console.log(`   Result: ${JSON.stringify(call.result)}`);
+        });
+        toolCalls.length = 0; // Reset for next interaction
+    }
+});
+```
+
+## Error Handling
+
+### In Tool Execution
+
+```typescript
+const riskyTool = tool({
+    description: "Performs a risky operation",
+    inputSchema: z.object({
+        action: z.string(),
+    }),
+    execute: async ({ action }) => {
+        try {
+            const result = await performRiskyOperation(action);
+            return {
+                success: true,
+                result,
+            };
+        } catch (error) {
+            // Return error info so LLM can handle it
+            return {
+                success: false,
+                error: error.message,
+                suggestion: "Please try again with different parameters",
+            };
+        }
+    },
+});
+```
+
+### At Agent Level
+
+```typescript
+agent.on("error", (error) => {
+    console.error("Agent error:", error);
+    
+    // Check if it's a tool error
+    if (error.message.includes("Tool execution failed")) {
+        console.log("Tool error detected - continuing with fallback");
+        // Could notify user, retry, or use cached data
+    }
+});
+```
+
+## Best Practices
+
+### 1. Clear Descriptions
+
+```typescript
+// ❌ Bad: Vague description
+description: "Gets stuff"
+
+// ✅ Good: Specific and actionable
+description: "Get current weather conditions for a specific location"
+```
+
+### 2. Detailed Parameter Descriptions
+
+```typescript
+// ❌ Bad: No context
+location: z.string()
+
+// ✅ Good: Clear expectations
+location: z.string().describe("City name or full address (e.g., 'San Francisco' or 'New York, NY')")
+```
+
+### 3. Structured Return Values
+
+```typescript
+// ✅ Good: Consistent structure
+return {
+    success: true,
+    data: result,
+    metadata: {
+        timestamp: new Date().toISOString(),
+        source: "api",
+    },
+};
+```
+
+### 4. Validate Inputs
+
+```typescript
+execute: async ({ email }) => {
+    // Even though Zod validates, add business logic validation
+    if (!email.endsWith("@company.com")) {
+        return {
+            success: false,
+            error: "Only company email addresses are allowed",
+        };
+    }
+    // ...
+}
+```
+
+### 5. Handle Rate Limits
+
+```typescript
+import { RateLimiter } from "limiter";
+
+const limiter = new RateLimiter({ tokensPerInterval: 10, interval: "minute" });
+
+const apiTool = tool({
+    description: "Call external API",
+    inputSchema: z.object({ query: z.string() }),
+    execute: async ({ query }) => {
+        await limiter.removeTokens(1);
+        // Make API call
+    },
+});
+```
+
+## Testing Tools
+
+```typescript
+import { describe, it, expect } from "vitest";
+
+describe("weatherTool", () => {
+    it("should return weather data for valid location", async () => {
+        const result = await weatherTool.execute({
+            location: "San Francisco",
+            units: "fahrenheit",
+        });
+        
+        expect(result).toHaveProperty("location");
+        expect(result).toHaveProperty("temperature");
+        expect(result.units).toBe("fahrenheit");
+    });
+    
+    it("should handle invalid location", async () => {
+        const result = await weatherTool.execute({
+            location: "InvalidCity123",
+        });
+        
+        expect(result.success).toBe(false);
+        expect(result).toHaveProperty("error");
+    });
+});
+```
+
+## Next Steps
+
+- [API Reference](/api/voice-agent) - Full VoiceAgent API
+- [Basic Usage](/examples/basic-usage) - Getting started guide
+- [WebSocket Server](/examples/websocket-server) - Production server setup

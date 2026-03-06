@@ -1,0 +1,337 @@
+---
+title: 'Configuration'
+description: 'Configure VoiceAgent and VideoAgent with model settings, history limits, and speech options'
+---
+
+## Overview
+
+Both `VoiceAgent` and `VideoAgent` accept comprehensive configuration options for models, speech synthesis, transcription, history management, and more. This guide covers all available configuration fields with their types, defaults, and usage examples.
+
+## VoiceAgent Configuration
+
+### Required Options
+
+<ParamField path="model" type="LanguageModel" required>
+  AI SDK language model for chat generation. Use any AI SDK provider model.
+  
+  ```typescript
+  import { openai } from '@ai-sdk/openai';
+  import { anthropic } from '@ai-sdk/anthropic';
+  
+  model: openai('gpt-4o')
+  model: anthropic('claude-3.5-sonnet')
+  ```
+</ParamField>
+
+### Optional Models
+
+<ParamField path="transcriptionModel" type="TranscriptionModel">
+  AI SDK transcription model for speech-to-text. Required for audio input processing.
+  
+  ```typescript
+  transcriptionModel: openai.transcription('whisper-1')
+  ```
+</ParamField>
+
+<ParamField path="speechModel" type="SpeechModel">
+  AI SDK speech model for text-to-speech generation.
+  
+  ```typescript
+  speechModel: openai.speech('gpt-4o-mini-tts')
+  ```
+</ParamField>
+
+### System Configuration
+
+<ParamField path="instructions" type="string" default="You are a helpful voice assistant.">
+  System prompt that defines the agent's behavior and personality.
+  
+  ```typescript
+  instructions: `You are a helpful voice assistant. 
+  Keep responses concise and conversational since they will be spoken aloud.
+  Use tools when needed to provide accurate information.`
+  ```
+</ParamField>
+
+<ParamField path="stopWhen" type="StopWhenCondition" default="stepCountIs(5)">
+  Stopping condition for multi-step tool execution loops. Controls when the agent stops calling tools.
+  
+  ```typescript
+  import { stepCountIs } from 'ai';
+  
+  stopWhen: stepCountIs(3)  // Stop after 3 tool execution steps
+  ```
+</ParamField>
+
+<ParamField path="tools" type="Record<string, Tool>" default="{}">
+  AI SDK tools map for function calling. See [Tool Integration](/guides/tool-integration) for details.
+  
+  ```typescript
+  import { tool } from 'ai';
+  import { z } from 'zod';
+  
+  tools: {
+    getWeather: tool({
+      description: 'Get weather for a location',
+      inputSchema: z.object({
+        location: z.string()
+      }),
+      execute: async ({ location }) => ({ temperature: 72 })
+    })
+  }
+  ```
+</ParamField>
+
+### Speech Configuration
+
+<ParamField path="voice" type="string" default="alloy">
+  TTS voice ID. For OpenAI: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`.
+  
+  ```typescript
+  voice: 'nova'
+  ```
+</ParamField>
+
+<ParamField path="speechInstructions" type="string">
+  Style instructions passed to the speech model for tone and delivery.
+  
+  ```typescript
+  speechInstructions: 'Speak in a friendly, natural conversational tone.'
+  ```
+</ParamField>
+
+<ParamField path="outputFormat" type="string" default="mp3">
+  Audio output format: `mp3`, `opus`, `aac`, `wav`, `pcm`, etc.
+  
+  ```typescript
+  outputFormat: 'opus'
+  ```
+</ParamField>
+
+<ParamField path="streamingSpeech" type="Partial<StreamingSpeechConfig>">
+  Fine-tune streaming TTS behavior for low-latency audio.
+  
+  **StreamingSpeechConfig Fields:**
+  
+  | Field | Type | Default | Description |
+  |-------|------|---------|-------------|
+  | `minChunkSize` | `number` | `50` | Minimum characters before generating speech |
+  | `maxChunkSize` | `number` | `200` | Maximum characters per chunk (splits at sentence boundary) |
+  | `parallelGeneration` | `boolean` | `true` | Generate TTS for next chunks while current plays |
+  | `maxParallelRequests` | `number` | `3` | Maximum concurrent TTS requests |
+  
+  ```typescript
+  streamingSpeech: {
+    minChunkSize: 40,
+    maxChunkSize: 180,
+    parallelGeneration: true,
+    maxParallelRequests: 2
+  }
+  ```
+</ParamField>
+
+### History Management
+
+<ParamField path="history" type="Partial<HistoryConfig>">
+  Configure conversation history limits to manage memory and context window usage.
+  
+  **HistoryConfig Fields:**
+  
+  | Field | Type | Default | Description |
+  |-------|------|---------|-------------|
+  | `maxMessages` | `number` | `100` | Max messages in history (0 = unlimited) |
+  | `maxTotalChars` | `number` | `0` | Max total characters across all messages (0 = unlimited) |
+  
+  ```typescript
+  history: {
+    maxMessages: 50,        // Keep last 50 messages
+    maxTotalChars: 100_000  // Or trim when total exceeds 100k chars
+  }
+  ```
+  
+  <Note>
+  When limits are exceeded, **oldest messages are trimmed in pairs** (user + assistant) to preserve conversation turns. The agent emits a `history_trimmed` event with details.
+  </Note>
+</ParamField>
+
+### Size Limits
+
+<ParamField path="maxAudioInputSize" type="number" default="10485760">
+  Maximum audio input size in bytes (default: 10 MB). Rejects larger audio inputs.
+  
+  ```typescript
+  maxAudioInputSize: 5 * 1024 * 1024  // 5 MB limit
+  ```
+</ParamField>
+
+### WebSocket Configuration
+
+<ParamField path="endpoint" type="string">
+  Default WebSocket URL for `connect()` method. Optional for text-only usage.
+  
+  ```typescript
+  endpoint: 'ws://localhost:8080'
+  endpoint: process.env.VOICE_WS_ENDPOINT
+  ```
+</ParamField>
+
+## VideoAgent Configuration
+
+`VideoAgent` extends `VoiceAgent` with video-specific options:
+
+<ParamField path="maxFrameInputSize" type="number" default="5242880">
+  Maximum frame input size in bytes (default: 5 MB).
+  
+  ```typescript
+  maxFrameInputSize: 10 * 1024 * 1024  // 10 MB
+  ```
+</ParamField>
+
+<ParamField path="maxContextFrames" type="number" default="10">
+  Maximum number of frames to keep in context buffer for visual conversation history.
+  
+  ```typescript
+  maxContextFrames: 20
+  ```
+</ParamField>
+
+<ParamField path="sessionId" type="string">
+  Session ID for this video agent instance. Auto-generated if not provided.
+  
+  ```typescript
+  sessionId: 'custom-session-id'
+  ```
+</ParamField>
+
+<Note>
+**Important:** VideoAgent requires a **vision-enabled model** to process video frames:
+- OpenAI: `gpt-4o`, `gpt-4o-mini`
+- Anthropic: `claude-3.5-sonnet`, `claude-3-opus`
+- Google: `gemini-1.5-pro`, `gemini-1.5-flash`
+</Note>
+
+## Complete Example
+
+```typescript
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+import { openai } from '@ai-sdk/openai';
+import { stepCountIs, tool } from 'ai';
+import { z } from 'zod';
+
+const agent = new VoiceAgent({
+  // === Required ===
+  model: openai('gpt-4o'),
+  
+  // === Models ===
+  transcriptionModel: openai.transcription('whisper-1'),
+  speechModel: openai.speech('gpt-4o-mini-tts'),
+  
+  // === System ===
+  instructions: `You are a helpful voice assistant.
+  Keep responses concise and conversational.
+  Use tools when needed to provide accurate information.`,
+  stopWhen: stepCountIs(5),
+  
+  // === Tools ===
+  tools: {
+    getWeather: tool({
+      description: 'Get weather in a location',
+      inputSchema: z.object({ location: z.string() }),
+      execute: async ({ location }) => ({
+        location,
+        temperature: 72,
+        conditions: 'sunny'
+      })
+    })
+  },
+  
+  // === Speech ===
+  voice: 'alloy',
+  speechInstructions: 'Speak naturally and conversationally.',
+  outputFormat: 'mp3',
+  streamingSpeech: {
+    minChunkSize: 40,
+    maxChunkSize: 180,
+    parallelGeneration: true,
+    maxParallelRequests: 2
+  },
+  
+  // === History Management ===
+  history: {
+    maxMessages: 50,
+    maxTotalChars: 100_000
+  },
+  
+  // === Limits ===
+  maxAudioInputSize: 5 * 1024 * 1024,  // 5 MB
+  
+  // === WebSocket ===
+  endpoint: process.env.VOICE_WS_ENDPOINT
+});
+```
+
+## Runtime Configuration Updates
+
+### Updating Tools
+
+You can add or update tools after initialization:
+
+```typescript
+agent.registerTools({
+  getTime: tool({
+    description: 'Get current time',
+    inputSchema: z.object({}),
+    execute: async () => ({ time: new Date().toISOString() })
+  })
+});
+```
+
+### VideoAgent Configuration
+
+VideoAgent supports runtime config updates:
+
+```typescript
+const videoAgent = new VideoAgent({ /* ... */ });
+
+// Get current config
+const config = videoAgent.getConfig();
+console.log(config.maxContextFrames);
+
+// Update config
+videoAgent.updateConfig({
+  maxContextFrames: 20
+});
+
+// Listen for config changes
+videoAgent.on('config_changed', (newConfig) => {
+  console.log('Config updated:', newConfig);
+});
+```
+
+## Environment Variables Pattern
+
+A common pattern is to use environment variables for sensitive configuration:
+
+```typescript
+import 'dotenv/config';
+import { openai } from '@ai-sdk/openai';
+
+const agent = new VoiceAgent({
+  model: openai(process.env.OPENAI_MODEL || 'gpt-4o'),
+  transcriptionModel: openai.transcription('whisper-1'),
+  speechModel: openai.speech('gpt-4o-mini-tts'),
+  endpoint: process.env.VOICE_WS_ENDPOINT,
+  // ... other options
+});
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tool Integration" icon="wrench" href="/guides/tool-integration">
+    Learn how to integrate AI SDK tools for function calling
+  </Card>
+  <Card title="Browser Client" icon="browser" href="/guides/browser-client">
+    Build a real-time voice interface in the browser
+  </Card>
+</CardGroup>

@@ -1,0 +1,482 @@
+---
+title: 'Interruption Handling'
+description: 'Handle barge-in, cancel LLM streams, and manage speech interruption'
+---
+
+## Overview
+
+The Voice Agent SDK provides robust interruption handling to support natural conversational flow. Users can interrupt the agent at any time ("barge-in"), and the agent immediately cancels in-flight work to save tokens and reduce latency.
+
+## Interruption Types
+
+The SDK supports two levels of interruption:
+
+### 1. Speech-Only Interruption
+
+Cancels ongoing speech generation and playback, but **allows the LLM stream to continue**.
+
+```typescript
+agent.interruptSpeech('user_speaking');
+```
+
+**When to use:**
+- User starts speaking while agent is playing audio
+- You want to stop audio but let the LLM finish generating text (e.g., for display purposes)
+
+**What happens:**
+- Aborts current TTS generation
+- Clears pending TTS chunks from the queue
+- Emits `speech_interrupted` event
+- LLM stream continues running
+
+### 2. Full Interruption (Barge-In)
+
+Cancels **both** the LLM stream and speech generation.
+
+```typescript
+agent.interruptCurrentResponse('user_speaking');
+```
+
+**When to use:**
+- User starts speaking (true barge-in scenario)
+- You want to completely cancel the current response to process new input
+- Save tokens and API costs by stopping unnecessary generation
+
+**What happens:**
+- Aborts the LLM stream using `AbortController`
+- Cancels all speech generation
+- Clears pending TTS chunks
+- Emits `speech_interrupted` event
+- Agent immediately ready for new input
+
+## Implementation Details
+
+### AbortController for LLM Streams
+
+The agent uses `AbortController` to cancel in-flight LLM streams:
+
+```typescript
+// From VoiceAgent.new.ts:80-81, 193-199
+private currentStreamAbortController?: AbortController;
+
+public interruptCurrentResponse(reason: string = 'interrupted'): void {
+  if (this.currentStreamAbortController) {
+    this.currentStreamAbortController.abort();
+    this.currentStreamAbortController = undefined;
+  }
+  this.speech.interruptSpeech(reason);
+}
+```
+
+The abort signal is passed to `streamText()`:
+
+```typescript
+// From VoiceAgent.new.ts:386-400
+this.currentStreamAbortController = new AbortController();
+const streamAbortSignal = this.currentStreamAbortController.signal;
+
+const result = streamText({
+  model: this.model,
+  system: this.instructions,
+  messages: this.conversation.getHistoryRef(),
+  tools: this.tools,
+  stopWhen: this.stopWhen,
+  abortSignal: streamAbortSignal,  // ← Enables cancellation
+  // ...
+});
+```
+
+### Speech Queue Clearing
+
+The `SpeechManager` clears all pending chunks:
+
+```typescript
+public interruptSpeech(reason: string): void {
+  this.reset();  // Clears queue and pending state
+  this.emit('speech_interrupted', { reason });
+}
+```
+
+## Automatic Barge-In
+
+### Server-Side (VoiceAgent)
+
+The agent automatically interrupts when receiving user input:
+
+```typescript
+// From VoiceAgent.new.ts:326-332
+if (message.type === 'transcript') {
+  // User sent a transcript
+  this.interruptCurrentResponse('user_speaking');
+  await this.enqueueInput(message.text);
+} else if (message.type === 'audio') {
+  // User sent audio
+  this.interruptCurrentResponse('user_speaking');
+  await this.handleAudioInput(message.data, message.format);
+}
+```
+
+### Client-Side (Browser)
+
+The browser client detects speech and interrupts automatically:
+
+```javascript
+// From voice-client.html:419-426
+function autoBargeIn() {
+  if (!isAssistantSpeaking()) return;
+  
+  stopAudioPlayback();
+  
+  if (ws && connected) {
+    ws.send(JSON.stringify({ type: 'interrupt', reason: 'user_speaking' }));
+    console.log('Auto-interrupt: user started speaking');
+  }
+}
+```
+
+This is triggered in both STT modes:
+
+**Browser STT:**
+```javascript
+recognition.onresult = (event) => {
+  for (let i = event.resultIndex; i < event.results.length; i++) {
+    const text = event.results[i][0].transcript.trim();
+    if (!text) continue;
+    
+    if (event.results[i].isFinal) {
+      autoBargeIn();  // ← On final transcript
+      // Send to server...
+    } else {
+      autoBargeIn();  // ← Even on interim results
+      // Show interim text...
+    }
+  }
+};
+```
+
+**Server Whisper with VAD:**
+```javascript
+function vadCheck() {
+  // ... VAD logic ...
+  
+  if (isSpeech && !whisperSegmentActive) {
+    vadSpeechFrames += 1;
+    if (vadSpeechFrames >= VAD_SPEECH_START_FRAMES) {
+      autoBargeIn();  // ← When speech detected
+      beginWhisperSegment();
+    }
+  }
+}
+```
+
+## Manual Interruption
+
+### From Application Code
+
+```typescript
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+
+const agent = new VoiceAgent({ /* ... */ });
+
+// User clicks "Stop" button
+stopButton.on('click', () => {
+  agent.interruptCurrentResponse('user_clicked_stop');
+});
+
+// Timeout scenario
+setTimeout(() => {
+  if (agent.speaking) {
+    agent.interruptSpeech('timeout');
+  }
+}, 30000);
+
+// Priority message
+if (urgentMessageReceived) {
+  agent.interruptCurrentResponse('priority_message');
+  await agent.sendText(urgentMessage);
+}
+```
+
+### From Browser Client
+
+Send an interrupt message via WebSocket:
+
+```javascript
+interruptBtn.addEventListener('click', () => {
+  if (!ws || !connected) return;
+  
+  stopAudioPlayback();
+  
+  ws.send(JSON.stringify({
+    type: 'interrupt',
+    reason: 'user_clicked_interrupt'
+  }));
+  
+  console.log('Sent interrupt request');
+});
+```
+
+The server handles this message:
+
+```typescript
+// From VoiceAgent.new.ts:343-348
+else if (message.type === 'interrupt') {
+  console.log(
+    `Received interrupt request: ${message.reason || 'client_request'}`
+  );
+  this.interruptCurrentResponse(message.reason || 'client_request');
+}
+```
+
+## Interruption Events
+
+Listen for interruption events to update UI or log analytics:
+
+```typescript
+agent.on('speech_interrupted', ({ reason }) => {
+  console.log(`Speech interrupted: ${reason}`);
+  
+  // Update UI
+  updateStatus('Interrupted');
+  clearSpeakingIndicator();
+  
+  // Analytics
+  trackEvent('speech_interrupted', { reason });
+});
+```
+
+**Common interruption reasons:**
+- `user_speaking` — User started speaking (barge-in)
+- `user_clicked_stop` — User clicked stop/interrupt button
+- `client_request` — Generic client-side interruption
+- `timeout` — Response took too long
+- `priority_message` — Higher priority input received
+- `interrupted` — Default reason if none provided
+
+## Cleanup on Disconnect
+
+The agent automatically cleans up when disconnecting:
+
+```typescript
+// From VoiceAgent.new.ts:466-474
+private cleanupOnDisconnect(): void {
+  if (this.currentStreamAbortController) {
+    this.currentStreamAbortController.abort();
+    this.currentStreamAbortController = undefined;
+  }
+  this.speech.reset();
+  this._isProcessing = false;
+  this.inputQueue.rejectAll(new Error('Connection closed'));
+}
+```
+
+This ensures:
+- LLM stream is cancelled
+- Speech queue is cleared
+- Pending inputs are rejected
+- No lingering resources
+
+## Interruption in Multi-Step Tool Execution
+
+When tools are executing, interruption cancels the entire operation:
+
+<Steps>
+  <Step title="LLM calls first tool">
+    Agent begins multi-step workflow with tool call.
+  </Step>
+  
+  <Step title="User interrupts">
+    `interruptCurrentResponse()` is called while tool is executing.
+  </Step>
+  
+  <Step title="Stream aborts">
+    `AbortController` cancels the stream, preventing subsequent tool calls.
+  </Step>
+  
+  <Step title="Current tool completes">
+    The tool already executing may complete, but results are discarded.
+  </Step>
+  
+  <Step title="Agent ready">
+    Agent immediately ready to process new input.
+  </Step>
+</Steps>
+
+<Warning>
+Interrupting mid-tool-execution may leave tools in an incomplete state. Design tools to be idempotent or handle partial execution gracefully.
+</Warning>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use full interruption for barge-in">
+    When a user starts speaking, call `interruptCurrentResponse()` to cancel both LLM and speech. This saves tokens and provides the fastest response to new input.
+    
+    ```typescript
+    agent.on('audio_received', () => {
+      agent.interruptCurrentResponse('user_speaking');
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Provide visual feedback">
+    Show users when interruption occurs:
+    
+    ```typescript
+    agent.on('speech_interrupted', ({ reason }) => {
+      showToast(`Interrupted: ${reason}`);
+      updateStatusIndicator('ready');
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Pass meaningful reasons">
+    Use descriptive reasons for interruption to help with debugging and analytics:
+    
+    ```typescript
+    agent.interruptCurrentResponse('user_started_typing');
+    agent.interruptCurrentResponse('urgent_notification');
+    agent.interruptCurrentResponse('call_incoming');
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle interruption in long-running tools">
+    If your tools do external API calls or long operations, check for cancellation:
+    
+    ```typescript
+    const searchTool = tool({
+      description: 'Search for information',
+      inputSchema: z.object({ query: z.string() }),
+      execute: async ({ query }, { abortSignal }) => {
+        const response = await fetch(url, { signal: abortSignal });
+        return await response.json();
+      }
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Test barge-in latency">
+    Measure time from user speech to interruption:
+    
+    ```typescript
+    let bargeInStart = 0;
+    
+    agent.on('audio_received', () => {
+      bargeInStart = Date.now();
+    });
+    
+    agent.on('speech_interrupted', () => {
+      const latency = Date.now() - bargeInStart;
+      console.log(`Barge-in latency: ${latency}ms`);
+    });
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Debounced Interruption
+
+Prevent accidental interruptions from brief pauses:
+
+```typescript
+let interruptDebounce = null;
+
+function debouncedInterrupt(reason: string, delay: number = 500) {
+  if (interruptDebounce) clearTimeout(interruptDebounce);
+  
+  interruptDebounce = setTimeout(() => {
+    agent.interruptCurrentResponse(reason);
+    interruptDebounce = null;
+  }, delay);
+}
+
+// Cancel debounce if user stops speaking quickly
+function cancelInterrupt() {
+  if (interruptDebounce) {
+    clearTimeout(interruptDebounce);
+    interruptDebounce = null;
+  }
+}
+```
+
+### Conditional Interruption
+
+Only interrupt in certain states:
+
+```typescript
+function conditionalInterrupt(reason: string) {
+  // Don't interrupt during critical announcements
+  if (currentMessagePriority === 'critical') {
+    console.log('Skipping interrupt for critical message');
+    return;
+  }
+  
+  // Don't interrupt very short responses (let them finish)
+  if (agent.speaking && agent.pendingSpeechChunks < 2) {
+    console.log('Letting short response finish');
+    return;
+  }
+  
+  agent.interruptCurrentResponse(reason);
+}
+```
+
+### Interrupt and Resume
+
+Save state before interruption for potential resumption:
+
+```typescript
+let interruptedResponse: string | null = null;
+
+agent.on('text', ({ role, text }) => {
+  if (role === 'assistant') {
+    interruptedResponse = text;
+  }
+});
+
+agent.on('speech_interrupted', ({ reason }) => {
+  if (reason === 'user_speaking' && interruptedResponse) {
+    console.log('Response was interrupted:', interruptedResponse);
+    // Optionally offer to continue later
+  }
+});
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Interruption seems slow">
+    Check:
+    - Are you calling `interruptCurrentResponse()` instead of just `interruptSpeech()`?
+    - Is there network latency between client and server?
+    - Are you using WebSocket for real-time communication?
+    - Is the browser's audio queue too long?
+  </Accordion>
+  
+  <Accordion title="LLM keeps generating after interrupt">
+    Ensure you're using `interruptCurrentResponse()` (not `interruptSpeech()`). Verify the `AbortController` is being properly set and aborted.
+  </Accordion>
+  
+  <Accordion title="Tool execution continues after interrupt">
+    The currently executing tool may complete even after abort signal. This is expected. Design tools to be cancellable if needed.
+  </Accordion>
+  
+  <Accordion title="Speech interruption not working">
+    Check that:
+    - `speechModel` is configured
+    - Speech generation is actually active (`agent.speaking === true`)
+    - You're calling `interruptSpeech()` or `interruptCurrentResponse()`
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Browser Client" icon="browser" href="/guides/browser-client">
+    See interruption handling in the complete browser implementation
+  </Card>
+  <Card title="History Management" icon="clock-rotate-left" href="/guides/history-management">
+    Learn how to manage conversation state across interruptions
+  </Card>
+</CardGroup>

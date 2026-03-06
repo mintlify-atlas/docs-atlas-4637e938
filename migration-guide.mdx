@@ -1,0 +1,470 @@
+---
+title: Migration Guide
+description: Guide for migrating between versions of Voice Agent AI SDK
+icon: "arrow-right-arrow-left"
+---
+
+This guide helps you migrate between major versions of the Voice Agent AI SDK.
+
+## Current Version: 1.0.1
+
+The SDK is currently at version **1.0.1**, building on the improvements introduced in version 0.1.0.
+
+---
+
+## Migrating from 0.0.1 to 0.1.0
+
+<Warning>
+Version 0.1.0 includes **breaking changes** to connection lifecycle and speech interruption behavior. Please review this guide carefully.
+</Warning>
+
+Version 0.1.0 was released on **July 15, 2025** with significant improvements to memory management, connection handling, and race condition prevention.
+
+### Breaking Changes
+
+#### 1. `disconnect()` Now Performs Full Cleanup
+
+**Before (0.0.1):**
+```typescript
+// disconnect() only closed the socket
+agent.disconnect();
+// LLM streams, TTS, and queued inputs kept running
+```
+
+**After (0.1.0+):**
+```typescript
+// disconnect() now aborts ALL in-flight work
+agent.disconnect();
+// ✅ LLM stream aborted
+// ✅ TTS generation cancelled
+// ✅ Speech queue cleared
+// ✅ Pending input promises rejected
+```
+
+<Note>
+**Migration:** If you relied on the old behavior where only the socket closed, you'll need to adjust your code. The new behavior is safer and prevents resource leaks.
+</Note>
+
+#### 2. `connect()` and `handleSocket()` Now Idempotent
+
+**Before (0.0.1):**
+```typescript
+// Calling connect() again would leak the old connection
+await agent.connect("ws://server1");
+await agent.connect("ws://server2"); // ❌ Server1 socket leaked
+```
+
+**After (0.1.0+):**
+```typescript
+// Automatically cleans up old connection first
+await agent.connect("ws://server1");
+await agent.connect("ws://server2"); // ✅ Server1 properly closed
+```
+
+<Note>
+**Migration:** No code changes needed. Your code is now safer if you reconnect without explicitly calling `disconnect()` first.
+</Note>
+
+#### 3. Race Conditions in Concurrent Inputs Now Prevented
+
+**Before (0.0.1):**
+```typescript
+// These could corrupt conversation history
+await Promise.all([
+  agent.sendText("Hello"),
+  agent.sendText("How are you?"),
+  agent.sendText("What's the weather?"),
+]);
+// ❌ Possible interleaved responses or corrupted history
+```
+
+**After (0.1.0+):**
+```typescript
+// Automatically queued and processed serially
+await Promise.all([
+  agent.sendText("Hello"),
+  agent.sendText("How are you?"),
+  agent.sendText("What's the weather?"),
+]);
+// ✅ Each input processed in order, one at a time
+```
+
+<Note>
+**Migration:** No code changes needed. Your concurrent calls are now safe by default.
+</Note>
+
+### New Features to Adopt
+
+#### 1. Conversation History Limits
+
+Prevents unbounded memory growth in long-running conversations.
+
+<Steps>
+  <Step title="Configure history limits">
+    Add `history` configuration to prevent memory issues:
+
+    ```typescript
+    const agent = new VoiceAgent({
+      model: openai("gpt-4o"),
+      // New in 0.1.0: Memory management
+      history: {
+        maxMessages: 100,       // Keep last 100 messages (default)
+        maxTotalChars: 100_000, // Or trim when total exceeds 100k chars
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Listen for trim events (optional)">
+    Monitor when messages are removed:
+
+    ```typescript
+    agent.on("history_trimmed", ({ removedCount, reason }) => {
+      console.log(`Trimmed ${removedCount} old messages: ${reason}`);
+      // Reasons: "max_messages" or "max_chars"
+    });
+    ```
+  </Step>
+</Steps>
+
+<Info>
+Messages are always trimmed in **pairs** (user + assistant) to preserve conversation turn structure.
+</Info>
+
+#### 2. Audio Input Size Validation
+
+Rejects oversized audio before sending to the transcription API.
+
+```typescript
+const agent = new VoiceAgent({
+  model: openai("gpt-4o"),
+  transcriptionModel: openai.transcription("whisper-1"),
+  // New in 0.1.0: Limit audio size (default: 10 MB)
+  maxAudioInputSize: 5 * 1024 * 1024, // 5 MB
+});
+
+// Oversized audio is rejected with error event
+agent.on("error", (error) => {
+  console.error(error.message);
+  // "Audio input too large (12.5 MB). Maximum allowed: 5.0 MB"
+});
+```
+
+#### 3. `interruptCurrentResponse()` Method
+
+**Better barge-in support** that stops both LLM generation and speech.
+
+**Before (0.0.1):**
+```typescript
+// Only interrupted speech, LLM kept generating (wasting tokens)
+agent.interruptSpeech("user_speaking");
+```
+
+**After (0.1.0+):**
+```typescript
+// New method: interrupts BOTH LLM and speech
+agent.interruptCurrentResponse("user_speaking");
+
+// Old method still works if you only want to stop speech:
+agent.interruptSpeech("user_speaking"); // LLM continues
+```
+
+<Warning>
+If you implemented barge-in using `interruptSpeech()`, consider switching to `interruptCurrentResponse()` to also abort the LLM stream and save tokens.
+</Warning>
+
+#### 4. `destroy()` Method for Cleanup
+
+Permanently releases all resources when you're done with an agent.
+
+```typescript
+const agent = new VoiceAgent({ ... });
+
+// When session ends
+agent.on("disconnected", () => {
+  agent.destroy();
+  console.log(agent.destroyed); // true
+});
+
+// Any method call after destroy() throws
+try {
+  await agent.sendText("Hello");
+} catch (error) {
+  console.error(error.message);
+  // "VoiceAgent has been destroyed and cannot be used"
+}
+```
+
+<Info>
+**Best Practice:** Always call `destroy()` when done with an agent instance to prevent memory leaks, especially in multi-user scenarios.
+</Info>
+
+#### 5. Empty Input Validation
+
+**Before (0.0.1):**
+```typescript
+await agent.sendText(""); // Would process empty string
+```
+
+**After (0.1.0+):**
+```typescript
+const text = "";
+if (text.trim()) {
+  await agent.sendText(text);
+} else {
+  // Or handle the error:
+  try {
+    await agent.sendText("");
+  } catch (error) {
+    console.error(error.message); // "Text input cannot be empty"
+  }
+}
+```
+
+### Performance Improvements
+
+#### 1. Promise-Based Speech Queue
+
+<Check>**No code changes needed** — this is an internal improvement.</Check>
+
+**Before (0.0.1):**
+```typescript
+// Busy-wait polling (high CPU usage)
+while (queue.length) {
+  await sleep(100);
+}
+```
+
+**After (0.1.0+):**
+```typescript
+// Promise-based waiting (efficient)
+await speechQueueDonePromise;
+```
+
+**Result:** Reduced CPU usage and eliminated race conditions.
+
+#### 2. LLM Stream Cancellation via AbortSignal
+
+<Check>**No code changes needed** — this is an internal improvement.</Check>
+
+LLM streams are now immediately aborted on:
+- User barge-in (new input received)
+- WebSocket disconnect
+- Explicit `interruptCurrentResponse()` call
+
+**Result:** Faster interruptions and reduced token usage.
+
+### Bug Fixes
+
+- Fixed JSDoc typo: `"Process text deltra"` → `"Process text delta"`
+- Fixed potential unhandled exceptions when socket closes mid-send
+- Fixed speech queue potentially hanging after barge-in
+- Fixed WebSocket messages matching multiple type branches
+
+### Migration Checklist
+
+<Steps>
+  <Step title="Update package version">
+    ```bash
+    pnpm add voice-agent-ai-sdk@latest
+    ```
+  </Step>
+
+  <Step title="Add history limits (recommended)">
+    Prevent memory growth in long conversations:
+    ```typescript
+    const agent = new VoiceAgent({
+      // ... existing config
+      history: {
+        maxMessages: 100,
+        maxTotalChars: 100_000,
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Add audio size limits (optional)">
+    If accepting audio input:
+    ```typescript
+    maxAudioInputSize: 10 * 1024 * 1024, // 10 MB (default)
+    ```
+  </Step>
+
+  <Step title="Update barge-in logic (if applicable)">
+    Switch from `interruptSpeech()` to `interruptCurrentResponse()`:
+    ```typescript
+    // Old
+    agent.interruptSpeech("user_speaking");
+
+    // New (recommended)
+    agent.interruptCurrentResponse("user_speaking");
+    ```
+  </Step>
+
+  <Step title="Add destroy() calls">
+    Clean up agents when sessions end:
+    ```typescript
+    agent.on("disconnected", () => {
+      agent.destroy();
+    });
+    ```
+  </Step>
+
+  <Step title="Handle empty input errors">
+    Add validation before `sendText()`:
+    ```typescript
+    if (!text.trim()) {
+      throw new Error("Text input cannot be empty");
+    }
+    await agent.sendText(text);
+    ```
+  </Step>
+
+  <Step title="Test your application">
+    Key areas to test:
+    - Reconnection behavior (should cleanly close old connections)
+    - Concurrent inputs (should process serially)
+    - Barge-in functionality (should abort LLM + speech)
+    - Long conversations (should trim history automatically)
+    - Error handling (warnings, errors, empty input)
+  </Step>
+</Steps>
+
+### Example: Full 0.1.0 Configuration
+
+```typescript
+import "dotenv/config";
+import { VoiceAgent } from "voice-agent-ai-sdk";
+import { openai } from "@ai-sdk/openai";
+import { tool } from "ai";
+import { z } from "zod";
+
+const agent = new VoiceAgent({
+  // Core models
+  model: openai("gpt-4o"),
+  transcriptionModel: openai.transcription("whisper-1"),
+  speechModel: openai.speech("gpt-4o-mini-tts"),
+  
+  // Instructions
+  instructions: "You are a helpful voice assistant.",
+  voice: "alloy",
+  speechInstructions: "Speak naturally and conversationally.",
+  outputFormat: "mp3",
+  
+  // Tools
+  tools: {
+    getWeather: tool({
+      description: "Get weather for a location",
+      parameters: z.object({ location: z.string() }),
+      execute: async ({ location }) => ({ temperature: 72, conditions: "sunny" }),
+    }),
+  },
+  
+  // NEW in 0.1.0: Memory management
+  history: {
+    maxMessages: 100,
+    maxTotalChars: 100_000,
+  },
+  maxAudioInputSize: 10 * 1024 * 1024, // 10 MB
+  
+  // Streaming speech configuration
+  streamingSpeech: {
+    minChunkSize: 40,
+    maxChunkSize: 180,
+    parallelGeneration: true,
+    maxParallelRequests: 3,
+  },
+  
+  // WebSocket endpoint
+  endpoint: process.env.VOICE_WS_ENDPOINT,
+});
+
+// Event listeners
+agent.on("text", ({ role, text }) => {
+  console.log(`${role}: ${text}`);
+});
+
+agent.on("chunk:text_delta", ({ text }) => {
+  process.stdout.write(text);
+});
+
+// NEW in 0.1.0: History trimmed event
+agent.on("history_trimmed", ({ removedCount, reason }) => {
+  console.log(`Trimmed ${removedCount} messages: ${reason}`);
+});
+
+agent.on("error", (error) => {
+  console.error("Error:", error);
+});
+
+agent.on("warning", (message) => {
+  console.warn("Warning:", message);
+});
+
+// NEW in 0.1.0: Always destroy when done
+agent.on("disconnected", () => {
+  console.log("Disconnected");
+  agent.destroy();
+});
+
+// Connect
+await agent.connect();
+```
+
+## Multi-User Server Pattern
+
+<Warning>
+**Critical:** Each `VoiceAgent` instance is designed for **one user**. Never share an instance across multiple WebSocket connections.
+</Warning>
+
+### Correct Pattern
+
+```typescript
+import { WebSocketServer } from "ws";
+import { VoiceAgent } from "voice-agent-ai-sdk";
+
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on("connection", (socket) => {
+  // ✅ Create NEW agent for each connection
+  const agent = new VoiceAgent({
+    model: openai("gpt-4o"),
+    transcriptionModel: openai.transcription("whisper-1"),
+    speechModel: openai.speech("gpt-4o-mini-tts"),
+    history: {
+      maxMessages: 100,
+    },
+  });
+
+  // Attach socket
+  agent.handleSocket(socket);
+
+  // Clean up when user disconnects (0.1.0+)
+  agent.on("disconnected", () => {
+    agent.destroy();
+  });
+});
+```
+
+### Incorrect Pattern
+
+```typescript
+// ❌ WRONG: Shared agent across all users
+const agent = new VoiceAgent({ ... });
+
+wss.on("connection", (socket) => {
+  agent.handleSocket(socket); // ❌ Overwrites previous connection!
+  // Conversations will be mixed, history corrupted
+});
+```
+
+## Getting Help
+
+If you encounter issues during migration:
+
+1. Check the [Changelog](/changelog) for detailed release notes
+2. Review the [Troubleshooting](/troubleshooting) guide
+3. See example code in the repository:
+   - `example/demo.ts`
+   - `example/ws-server.ts`
+4. Report issues on [GitHub](https://github.com/Bijit-Mondal/voiceAgent/issues)

@@ -1,0 +1,327 @@
+---
+title: VoiceAgent Architecture
+description: Understanding the VoiceAgent lifecycle, event-driven design, and one-instance-per-user pattern
+---
+
+## Overview
+
+The `VoiceAgent` is the primary class for building voice-enabled AI assistants. It orchestrates streaming text generation, audio transcription, text-to-speech synthesis, and WebSocket communication through a modular, event-driven architecture.
+
+## Core Architecture
+
+### One Instance Per User
+
+**Critical:** Each `VoiceAgent` instance is designed for **one user per instance**. The agent maintains its own:
+
+- Conversation history
+- Input queue
+- Speech state
+- WebSocket connection
+
+<Warning>
+Sharing a single `VoiceAgent` instance across multiple users will cause:
+- Conversation history cross-contamination
+- Interleaved audio playback
+- Race conditions and unpredictable behavior
+</Warning>
+
+For multi-user applications, create a separate agent for each connection:
+
+```ts
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+import { openai } from '@ai-sdk/openai';
+
+wss.on('connection', (socket) => {
+  const agent = new VoiceAgent({
+    model: openai('gpt-4o'),
+    transcriptionModel: openai.transcription('whisper-1'),
+    speechModel: openai.speech('gpt-4o-mini-tts'),
+    instructions: 'You are a helpful voice assistant.',
+  });
+  
+  agent.handleSocket(socket);
+  
+  // Clean up when user disconnects
+  agent.on('disconnected', () => {
+    agent.destroy();
+  });
+});
+```
+
+## Manager-Based Architecture
+
+The `VoiceAgent` delegates responsibilities to specialized managers:
+
+### WebSocketManager
+
+Handles WebSocket lifecycle, connection state, and message routing.
+
+```ts
+/home/daytona/workspace/source/src/core/WebSocketManager.ts:9-63
+```
+
+### SpeechManager
+
+Manages streaming speech generation, chunk queueing, and parallel TTS requests.
+
+```ts
+/home/daytona/workspace/source/src/core/SpeechManager.ts:24-54
+```
+
+### ConversationManager
+
+Maintains conversation history with automatic trimming based on `HistoryConfig`.
+
+```ts
+/home/daytona/workspace/source/src/core/ConversationManager.ts:13-23
+```
+
+### TranscriptionManager
+
+Handles audio input validation, size limits, and transcription via AI SDK models.
+
+### InputQueue
+
+Serializes concurrent requests to prevent race conditions. All `sendText()` and `sendAudio()` calls are queued and processed one at a time.
+
+## Event-Driven Design
+
+The agent uses Node.js `EventEmitter` to bubble events from managers to consumers:
+
+```ts
+// Event bubbling setup
+this.bubbleEvents(this.speech, [
+  'speech_start',
+  'speech_complete',
+  'speech_interrupted',
+  'speech_chunk_queued',
+  'audio_chunk',
+]);
+
+this.bubbleEvents(this.conversation, [
+  'history_cleared',
+  'history_trimmed',
+]);
+```
+
+### Key Events
+
+<CardGroup cols={2}>
+  <Card title="Text Events" icon="message">
+    - `text` - User input or assistant response
+    - `chunk:text_delta` - Streaming text tokens
+    - `chunk:reasoning_delta` - Reasoning tokens
+  </Card>
+  
+  <Card title="Speech Events" icon="microphone">
+    - `speech_start` - TTS begins
+    - `audio_chunk` - Streaming audio ready
+    - `speech_interrupted` - Barge-in occurred
+  </Card>
+  
+  <Card title="Tool Events" icon="wrench">
+    - `chunk:tool_call` - Tool invocation
+    - `tool_result` - Tool execution complete
+  </Card>
+  
+  <Card title="Lifecycle Events" icon="circle-nodes">
+    - `connected` / `disconnected` - WebSocket state
+    - `history_trimmed` - Memory limit reached
+  </Card>
+</CardGroup>
+
+## Agent Lifecycle
+
+### Initialization
+
+```ts
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  transcriptionModel: openai.transcription('whisper-1'),
+  speechModel: openai.speech('gpt-4o-mini-tts'),
+  instructions: 'You are a helpful assistant.',
+  voice: 'alloy',
+  streamingSpeech: {
+    minChunkSize: 50,
+    maxChunkSize: 200,
+    parallelGeneration: true,
+    maxParallelRequests: 3,
+  },
+  history: {
+    maxMessages: 100,
+    maxTotalChars: 50000,
+  },
+});
+```
+
+### Connection Handling
+
+**Client-side (connect to server):**
+
+```ts
+await agent.connect('ws://localhost:8080');
+```
+
+**Server-side (accept connections):**
+
+```ts
+wss.on('connection', (socket) => {
+  agent.handleSocket(socket);
+});
+```
+
+### Input Processing
+
+```ts
+// Text input (bypasses transcription)
+const response = await agent.sendText('What is the weather?');
+
+// Audio input (base64)
+await agent.sendAudio(base64AudioData);
+
+// Audio input (buffer)
+await agent.sendAudioBuffer(audioBuffer);
+```
+
+### State Properties
+
+```ts
+agent.connected      // WebSocket connected?
+agent.processing     // LLM stream active?
+agent.speaking       // TTS generation active?
+agent.pendingSpeechChunks  // Queued TTS chunks
+agent.destroyed      // Agent destroyed?
+```
+
+### Interruption Support
+
+```ts
+// Interrupt speech only (LLM keeps running)
+agent.interruptSpeech('user_speaking');
+
+// Interrupt both LLM stream and speech (barge-in)
+agent.interruptCurrentResponse('user_speaking');
+```
+
+### Cleanup
+
+```ts
+// Graceful disconnect (aborts in-flight work)
+agent.disconnect();
+
+// Permanent destruction (cannot be reused)
+agent.destroy();
+```
+
+## Processing Flow
+
+When a user sends input (text or audio):
+
+1. **Input arrives** via `sendText()`, `sendAudio()`, or WebSocket message
+2. **Queue serialization** - Request enters `InputQueue` for serial processing
+3. **Audio transcription** (if audio input) - TranscriptionManager converts to text
+4. **History management** - User message added, trimming applied if needed
+5. **LLM streaming** - `streamText()` called with conversation history
+6. **Speech chunking** - Text streamed to `SpeechManager` for sentence extraction
+7. **Parallel TTS** - Multiple chunks generate audio simultaneously
+8. **Sequential playback** - Audio chunks sent in order via WebSocket
+9. **History update** - Assistant response added to conversation
+10. **Queue next** - Next queued request begins processing
+
+## Abort Controllers
+
+ The agent uses `AbortController` for clean cancellation:
+
+```ts
+// Current LLM stream
+private currentStreamAbortController?: AbortController;
+
+// Interrupt both stream and speech
+public interruptCurrentResponse(reason: string = 'interrupted'): void {
+  if (this.currentStreamAbortController) {
+    this.currentStreamAbortController.abort();
+    this.currentStreamAbortController = undefined;
+  }
+  this.speech.interruptSpeech(reason);
+}
+```
+
+This ensures:
+- LLM generation stops immediately
+- In-flight TTS requests are cancelled
+- No wasted API calls or tokens
+- Fast response to user interruption
+
+## Error Handling
+
+Errors are emitted via the `error` event:
+
+```ts
+agent.on('error', (error) => {
+  console.error('Agent error:', error);
+  // Handle transcription failures, TTS errors, etc.
+});
+
+agent.on('warning', (message) => {
+  console.warn('Agent warning:', message);
+  // Handle non-fatal issues (empty input, etc.)
+});
+```
+
+## Configuration Options
+
+<ParamField path="model" type="LanguageModel" required>
+  AI SDK chat model (e.g., `openai('gpt-4o')`)
+</ParamField>
+
+<ParamField path="transcriptionModel" type="TranscriptionModel">
+  AI SDK transcription model (e.g., `openai.transcription('whisper-1')`)
+</ParamField>
+
+<ParamField path="speechModel" type="SpeechModel">
+  AI SDK speech model (e.g., `openai.speech('gpt-4o-mini-tts')`)
+</ParamField>
+
+<ParamField path="instructions" type="string" default="You are a helpful voice assistant.">
+  System prompt for the LLM
+</ParamField>
+
+<ParamField path="voice" type="string" default="alloy">
+  TTS voice identifier
+</ParamField>
+
+<ParamField path="outputFormat" type="string" default="opus">
+  Audio output format (`mp3`, `opus`, `wav`, etc.)
+</ParamField>
+
+<ParamField path="streamingSpeech" type="StreamingSpeechConfig">
+  Configuration for streaming TTS behavior. See [Streaming Speech](/concepts/streaming-speech).
+</ParamField>
+
+<ParamField path="history" type="HistoryConfig">
+  Conversation memory limits. See [Memory Management](/concepts/memory-management).
+</ParamField>
+
+<ParamField path="maxAudioInputSize" type="number" default="10485760">
+  Maximum audio input size in bytes (default: 10 MB)
+</ParamField>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="VideoAgent" icon="video" href="/concepts/video-agent">
+    Learn about vision model support and frame processing
+  </Card>
+  
+  <Card title="Streaming Speech" icon="volume" href="/concepts/streaming-speech">
+    Understand chunked TTS and parallel generation
+  </Card>
+  
+  <Card title="Memory Management" icon="database" href="/concepts/memory-management">
+    Configure history limits and trimming behavior
+  </Card>
+  
+  <Card title="WebSocket Protocol" icon="plug" href="/concepts/websocket-protocol">
+    Explore message types and protocol specification
+  </Card>
+</CardGroup>

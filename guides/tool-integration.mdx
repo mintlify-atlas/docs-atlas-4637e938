@@ -1,0 +1,473 @@
+---
+title: 'Tool Integration'
+description: 'Integrate AI SDK tools with VoiceAgent for function calling and multi-step execution'
+---
+
+## Overview
+
+The Voice Agent SDK seamlessly integrates with [AI SDK tools](https://sdk.vercel.ai/docs/ai-sdk-core/tools-and-tool-calling) for function calling. The agent automatically handles tool execution, streams tool calls and results, and supports multi-step workflows.
+
+## Creating Tools
+
+Tools are defined using the AI SDK's `tool()` function with Zod schemas:
+
+```typescript
+import { tool } from 'ai';
+import { z } from 'zod';
+
+const weatherTool = tool({
+  description: 'Get the weather in a location',
+  inputSchema: z.object({
+    location: z.string().describe('The location to get the weather for')
+  }),
+  execute: async ({ location }) => ({
+    location,
+    temperature: 72 + Math.floor(Math.random() * 21) - 10,
+    conditions: ['sunny', 'cloudy', 'rainy', 'partly cloudy'][
+      Math.floor(Math.random() * 4)
+    ]
+  })
+});
+```
+
+<Note>
+The `description` and parameter descriptions in your Zod schema help the LLM understand when and how to use the tool. Make them clear and specific.
+</Note>
+
+## Registering Tools
+
+### During Initialization
+
+Pass tools in the `tools` option when creating the agent:
+
+```typescript
+import { VoiceAgent } from 'voice-agent-ai-sdk';
+import { openai } from '@ai-sdk/openai';
+
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  tools: {
+    getWeather: weatherTool,
+    getTime: timeTool
+  }
+});
+```
+
+### After Initialization
+
+Add or update tools dynamically using `registerTools()`:
+
+```typescript
+const searchTool = tool({
+  description: 'Search the web for information',
+  inputSchema: z.object({
+    query: z.string()
+  }),
+  execute: async ({ query }) => {
+    // Search implementation
+    return { results: [...] };
+  }
+});
+
+agent.registerTools({
+  search: searchTool
+});
+```
+
+<Note>
+`registerTools()` **merges** tools with existing ones. It doesn't replace the entire tools map.
+</Note>
+
+## Real-World Example from Demo
+
+Here's the complete weather tool from the SDK's demo:
+
+```typescript
+import 'dotenv/config';
+import { VoiceAgent } from '../src';
+import { tool } from 'ai';
+import { z } from 'zod';
+import { openai } from '@ai-sdk/openai';
+
+// 1. Define Tools
+const weatherTool = tool({
+  description: 'Get the weather in a location',
+  inputSchema: z.object({
+    location: z.string().describe('The location to get the weather for')
+  }),
+  execute: async ({ location }) => ({
+    location,
+    temperature: 72 + Math.floor(Math.random() * 21) - 10,
+    conditions: ['sunny', 'cloudy', 'rainy', 'partly cloudy'][
+      Math.floor(Math.random() * 4)
+    ]
+  })
+});
+
+const timeTool = tool({
+  description: 'Get the current time',
+  inputSchema: z.object({}),
+  execute: async () => ({
+    time: new Date().toLocaleTimeString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+  })
+});
+
+// 2. Initialize Agent with Tools
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  transcriptionModel: openai.transcription('whisper-1'),
+  speechModel: openai.speech('gpt-4o-mini-tts'),
+  instructions: `You are a helpful voice assistant. 
+  Keep responses concise and conversational since they will be spoken aloud.
+  Use tools when needed to provide accurate information.`,
+  tools: {
+    getWeather: weatherTool,
+    getTime: timeTool
+  }
+});
+
+// 3. Handle Tool Events
+agent.on('chunk:tool_call', ({ toolName, input }) => {
+  console.log(`[Tool] Calling ${toolName}...`, JSON.stringify(input));
+});
+
+agent.on('tool_result', ({ name, result }) => {
+  console.log(`[Tool] ${name} result:`, JSON.stringify(result));
+});
+
+// 4. Use the Agent
+await agent.sendText("What's the weather in San Francisco?");
+```
+
+## Tool Events
+
+The agent emits events throughout the tool calling lifecycle:
+
+### Stream-Level Events
+
+<ParamField path="chunk:tool_call" type="{ toolName, toolCallId, input }">
+  Emitted when the LLM decides to call a tool (during streaming).
+  
+  ```typescript
+  agent.on('chunk:tool_call', ({ toolName, toolCallId, input }) => {
+    console.log(`Calling ${toolName}`, input);
+  });
+  ```
+</ParamField>
+
+<ParamField path="tool_result" type="{ name, toolCallId, result }">
+  Emitted when a tool execution completes successfully.
+  
+  ```typescript
+  agent.on('tool_result', ({ name, toolCallId, result }) => {
+    console.log(`${name} returned:`, result);
+  });
+  ```
+</ParamField>
+
+### Example Event Flow
+
+When a user asks "What's the weather in SF?", you'll see:
+
+```
+[User] What's the weather in SF?
+[Tool] Calling getWeather... {"location":"San Francisco"}
+[Tool] getWeather result: {"location":"San Francisco","temperature":68,"conditions":"sunny"}
+[Assistant] It's currently 68°F and sunny in San Francisco.
+```
+
+## Multi-Step Tool Execution
+
+The agent supports **multi-step workflows** where the LLM can call multiple tools in sequence or make decisions based on tool results.
+
+### Controlling Multi-Step Execution
+
+Use the `stopWhen` option to control when the agent stops calling tools:
+
+```typescript
+import { stepCountIs } from 'ai';
+
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  stopWhen: stepCountIs(5),  // Stop after 5 tool execution steps
+  tools: {
+    search: searchTool,
+    calculate: calculateTool,
+    fetchData: fetchDataTool
+  }
+});
+```
+
+### Multi-Step Example
+
+```typescript
+const searchTool = tool({
+  description: 'Search for information',
+  inputSchema: z.object({ query: z.string() }),
+  execute: async ({ query }) => ({ results: ['...'] })
+});
+
+const summarizeTool = tool({
+  description: 'Summarize text',
+  inputSchema: z.object({ text: z.string() }),
+  execute: async ({ text }) => ({ summary: '...' })
+});
+
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  stopWhen: stepCountIs(3),
+  tools: {
+    search: searchTool,
+    summarize: summarizeTool
+  }
+});
+
+// User: "Search for AI news and summarize it"
+// Step 1: Calls search({ query: 'AI news' })
+// Step 2: Calls summarize({ text: searchResults })
+// Step 3: Responds with summary
+```
+
+<Warning>
+Set a reasonable `stepCountIs()` limit to prevent infinite loops and control costs. The default is 5 steps.
+</Warning>
+
+## Tool Execution and Streaming
+
+The agent executes tools **during the streaming process**:
+
+<Steps>
+  <Step title="LLM identifies tool need">
+    As the LLM streams its response, it may decide a tool is needed.
+  </Step>
+  
+  <Step title="chunk:tool_call event">
+    The agent emits `chunk:tool_call` with the tool name and parsed input.
+  </Step>
+  
+  <Step title="Tool execution">
+    The agent calls the tool's `execute()` function with the parsed input.
+  </Step>
+  
+  <Step title="tool_result event">
+    When execution completes, `tool_result` is emitted with the output.
+  </Step>
+  
+  <Step title="LLM incorporates result">
+    The LLM receives the tool output and continues generating its response.
+  </Step>
+</Steps>
+
+## Error Handling
+
+Handle tool execution errors gracefully:
+
+```typescript
+const apiTool = tool({
+  description: 'Call external API',
+  inputSchema: z.object({ endpoint: z.string() }),
+  execute: async ({ endpoint }) => {
+    try {
+      const response = await fetch(endpoint);
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      return await response.json();
+    } catch (error) {
+      // Return error info so LLM can respond appropriately
+      return {
+        error: true,
+        message: error.message
+      };
+    }
+  }
+});
+
+// Listen for errors
+agent.on('error', (error) => {
+  console.error('Agent error:', error);
+});
+```
+
+## Advanced Tool Patterns
+
+### Async Tool with External API
+
+```typescript
+const newsTool = tool({
+  description: 'Get latest news headlines',
+  inputSchema: z.object({
+    category: z.enum(['technology', 'business', 'sports'])
+  }),
+  execute: async ({ category }) => {
+    const response = await fetch(
+      `https://api.news.com/headlines?category=${category}`,
+      { headers: { 'Authorization': `Bearer ${process.env.NEWS_API_KEY}` } }
+    );
+    const data = await response.json();
+    return {
+      headlines: data.articles.slice(0, 5).map(a => a.title)
+    };
+  }
+});
+```
+
+### Tool with Complex Schema
+
+```typescript
+const bookingTool = tool({
+  description: 'Book a restaurant reservation',
+  inputSchema: z.object({
+    restaurant: z.string().describe('Name of the restaurant'),
+    date: z.string().describe('Date in YYYY-MM-DD format'),
+    time: z.string().describe('Time in HH:MM format'),
+    partySize: z.number().min(1).max(20).describe('Number of guests'),
+    preferences: z.object({
+      seating: z.enum(['indoor', 'outdoor', 'bar']).optional(),
+      dietary: z.array(z.string()).optional()
+    }).optional()
+  }),
+  execute: async ({ restaurant, date, time, partySize, preferences }) => {
+    // Booking logic
+    const confirmationId = await makeReservation({
+      restaurant,
+      date,
+      time,
+      partySize,
+      preferences
+    });
+    
+    return {
+      confirmed: true,
+      confirmationId,
+      details: { restaurant, date, time, partySize }
+    };
+  }
+});
+```
+
+### Tool with State Access
+
+```typescript
+class ConversationContext {
+  private userProfile: { name?: string; preferences?: string[] } = {};
+  
+  getProfileTool = tool({
+    description: 'Get user profile information',
+    inputSchema: z.object({}),
+    execute: async () => this.userProfile
+  });
+  
+  updateProfileTool = tool({
+    description: 'Update user profile',
+    inputSchema: z.object({
+      name: z.string().optional(),
+      preferences: z.array(z.string()).optional()
+    }),
+    execute: async (updates) => {
+      this.userProfile = { ...this.userProfile, ...updates };
+      return { success: true, profile: this.userProfile };
+    }
+  });
+}
+
+const context = new ConversationContext();
+const agent = new VoiceAgent({
+  model: openai('gpt-4o'),
+  tools: {
+    getProfile: context.getProfileTool,
+    updateProfile: context.updateProfileTool
+  }
+});
+```
+
+## WebSocket Integration
+
+When using WebSocket, tool events are automatically sent to connected clients:
+
+**Server → Client Messages:**
+
+```json
+// Tool call detected
+{
+  "type": "tool_call",
+  "toolName": "getWeather",
+  "input": { "location": "San Francisco" }
+}
+
+// Tool execution complete
+{
+  "type": "tool_result",
+  "toolName": "getWeather",
+  "result": { "temperature": 68, "conditions": "sunny" }
+}
+```
+
+See [Browser Client](/guides/browser-client) for how to handle these in your UI.
+
+## Testing Tools
+
+Test tools independently before integrating:
+
+```typescript
+import { tool } from 'ai';
+import { z } from 'zod';
+
+const weatherTool = tool({
+  description: 'Get weather',
+  inputSchema: z.object({ location: z.string() }),
+  execute: async ({ location }) => ({ temperature: 72 })
+});
+
+// Test the tool directly
+const result = await weatherTool.execute({ location: 'San Francisco' });
+console.log(result); // { temperature: 72 }
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Write clear descriptions">
+    Tool and parameter descriptions guide the LLM. Be specific:
+    
+    ✅ **Good:** `"Get current weather conditions for a specific city"`
+    
+    ❌ **Bad:** `"Weather tool"`
+  </Accordion>
+  
+  <Accordion title="Keep execute functions focused">
+    Each tool should do one thing well. Split complex operations into multiple tools.
+  </Accordion>
+  
+  <Accordion title="Return structured data">
+    Return objects with clear fields rather than strings. This helps the LLM format responses better.
+    
+    ```typescript
+    // Good
+    return { temperature: 72, conditions: 'sunny', humidity: 45 };
+    
+    // Avoid
+    return "It's 72 degrees and sunny with 45% humidity";
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle errors gracefully">
+    Catch errors in your execute functions and return error information the LLM can explain to users.
+  </Accordion>
+  
+  <Accordion title="Set appropriate stopWhen limits">
+    For simple tools, `stepCountIs(3)` is often sufficient. For complex workflows, increase as needed but watch costs.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Learn about all configuration options including stopWhen
+  </Card>
+  <Card title="Interruption Handling" icon="hand" href="/guides/interruption-handling">
+    Handle barge-in and interrupt ongoing tool execution
+  </Card>
+</CardGroup>

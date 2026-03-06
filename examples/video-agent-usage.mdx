@@ -1,0 +1,460 @@
+---
+title: "Video Agent Usage"
+description: "Build real-time multimodal agents with video and audio processing"
+---
+
+The `VideoAgent` extends voice capabilities with vision, allowing your agent to see what users are showing via webcam and respond intelligently.
+
+## Complete Video Server Example
+
+```typescript
+import "dotenv/config";
+import { WebSocketServer } from "ws";
+import { VideoAgent } from "voice-agent-ai";
+import { tool } from "ai";
+import { z } from "zod";
+import { openai } from "@ai-sdk/openai";
+import { mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
+
+// Optional: Save frames to disk for debugging
+const FRAMES_DIR = join(__dirname, "frames");
+mkdirSync(FRAMES_DIR, { recursive: true });
+
+let frameCounter = 0;
+
+function saveFrame(msg: {
+    sequence?: number;
+    timestamp?: number;
+    triggerReason?: string;
+    image: { data: string; format?: string; width?: number; height?: number };
+}) {
+    const idx = frameCounter++;
+    const ext = msg.image.format === "jpeg" ? "jpg" : (msg.image.format || "webp");
+    const filename = `frame_${String(idx).padStart(5, "0")}.${ext}`;
+    const filepath = join(FRAMES_DIR, filename);
+
+    const buf = Buffer.from(msg.image.data, "base64");
+    writeFileSync(filepath, buf);
+
+    console.log(
+        `[frames] Saved ${filename} (${(buf.length / 1024).toFixed(1)} kB, ` +
+        `${msg.image.width}×${msg.image.height}, ${msg.triggerReason})`
+    );
+}
+
+const endpoint = process.env.VIDEO_WS_ENDPOINT || "ws://localhost:8081";
+const url = new URL(endpoint);
+const port = Number(url.port || 8081);
+const host = url.hostname || "localhost";
+
+// Define tools
+const weatherTool = tool({
+    description: "Get the weather in a location",
+    inputSchema: z.object({
+        location: z.string().describe("The location to get the weather for"),
+    }),
+    execute: async ({ location }) => ({
+        location,
+        temperature: 72 + Math.floor(Math.random() * 21) - 10,
+        conditions: ["sunny", "cloudy", "rainy", "partly cloudy"][
+            Math.floor(Math.random() * 4)
+        ],
+    }),
+});
+
+const timeTool = tool({
+    description: "Get the current time",
+    inputSchema: z.object({}),
+    execute: async () => ({
+        time: new Date().toLocaleTimeString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
+});
+
+const wss = new WebSocketServer({ port, host });
+
+wss.on("listening", () => {
+    console.log(`[video-ws] listening on ${endpoint}`);
+    console.log(`[video-ws] Connect your video client to ${endpoint}`);
+});
+
+wss.on("connection", (socket) => {
+    console.log("[video-ws] ✓ client connected");
+
+    const agent = new VideoAgent({
+        model: openai("gpt-4o"),  // Vision-enabled model required
+        transcriptionModel: openai.transcription("whisper-1"),
+        speechModel: openai.speech("gpt-4o-mini-tts"),
+        instructions: `You are a helpful video+voice assistant.
+You can SEE what the user is showing via webcam.
+Describe what you see when it helps answer the question.
+Keep spoken answers concise and natural.`,
+        voice: "echo",
+        streamingSpeech: {
+            minChunkSize: 25,
+            maxChunkSize: 140,
+            parallelGeneration: true,
+            maxParallelRequests: 3,
+        },
+        tools: { getWeather: weatherTool, getTime: timeTool },
+        
+        // Video-specific configuration
+        maxContextFrames: 6,           // Keep last 6 frames in context
+        maxFrameInputSize: 2_500_000,  // ~2.5 MB max frame size
+    });
+
+    // Text and streaming events
+    agent.on("text", (data: { role: string; text: string }) => {
+        console.log(`[video] Text (${data.role}): ${data.text?.substring(0, 100)}...`);
+    });
+    
+    agent.on("chunk:text_delta", (data: { text: string }) => {
+        process.stdout.write(data.text || "");
+    });
+
+    // Video frame events
+    agent.on("frame_received", ({ sequence, size, dimensions, triggerReason }) => {
+        console.log(
+            `[video] Frame #${sequence} (${triggerReason}) ` +
+            `${size / 1024 | 0} kB ${dimensions.width}×${dimensions.height}`
+        );
+    });
+    
+    agent.on("frame_requested", ({ reason }) => {
+        console.log(`[video] Requested frame: ${reason}`);
+    });
+
+    // Audio and transcription events
+    agent.on("audio_received", ({ size, format }) => {
+        console.log(`[video] Audio received: ${size} bytes, format: ${format}`);
+    });
+    
+    agent.on("transcription", ({ text, language }) => {
+        console.log(`[video] Transcription: "${text}" (${language || "unknown"})`);
+    });
+
+    // Speech events
+    agent.on("speech_start", () => console.log(`[video] Speech started`));
+    agent.on("speech_complete", () => console.log(`[video] Speech complete`));
+    agent.on("audio_chunk", ({ chunkId, text }) => {
+        console.log(`[video] Audio chunk #${chunkId}: "${text?.substring(0, 50)}..."`);
+    });
+
+    // Error handling
+    agent.on("error", (error: Error) => {
+        console.error(`[video] ERROR:`, error);
+    });
+    
+    agent.on("warning", (warning: string) => {
+        console.warn(`[video] WARNING:`, warning);
+    });
+
+    agent.on("disconnected", () => {
+        agent.destroy();
+        console.log("[video-ws] ✗ client disconnected (agent destroyed)");
+    });
+
+    // Intercept raw messages to save frames to disk (optional)
+    socket.on("message", (raw) => {
+        try {
+            const msg = JSON.parse(raw.toString());
+            if (msg.type === "video_frame" && msg.image?.data) {
+                saveFrame(msg);
+            }
+        } catch {
+            // Not JSON - ignore, agent will handle binary etc.
+        }
+    });
+
+    // Hand socket to agent
+    agent.handleSocket(socket);
+});
+
+process.on("SIGINT", () => {
+    console.log("\n[video-ws] Shutting down...");
+    wss.close(() => {
+        console.log("[video-ws] Server closed");
+        process.exit(0);
+    });
+});
+```
+
+## Vision-Enabled Models
+
+The VideoAgent requires a vision-capable model:
+
+### OpenAI
+
+```typescript
+import { openai } from "@ai-sdk/openai";
+
+const agent = new VideoAgent({
+    model: openai("gpt-4o"),        // ✅ Supports vision
+    // model: openai("gpt-4-turbo"), // ✅ Also supports vision
+    // ...
+});
+```
+
+### Anthropic
+
+```typescript
+import { anthropic } from "@ai-sdk/anthropic";
+
+const agent = new VideoAgent({
+    model: anthropic("claude-3.5-sonnet-20241022"),  // ✅ Supports vision
+    // ...
+});
+```
+
+### Google
+
+```typescript
+import { google } from "@ai-sdk/google";
+
+const agent = new VideoAgent({
+    model: google("gemini-1.5-flash"),  // ✅ Supports vision
+    // model: google("gemini-1.5-pro"),  // ✅ Also supports vision
+    // ...
+});
+```
+
+## Frame Management
+
+### Configuration Options
+
+```typescript
+const agent = new VideoAgent({
+    // Maximum frames to keep in context buffer
+    // Higher = more visual history, more tokens used
+    maxContextFrames: 6,  // Default: 10
+    
+    // Maximum frame size in bytes
+    // Larger frames = better quality, more bandwidth
+    maxFrameInputSize: 2_500_000,  // Default: 5 MB
+    
+    // ...
+});
+```
+
+### Frame Context Buffer
+
+The agent maintains a rolling buffer of recent frames:
+
+```typescript
+// Get current frame context
+const frames = agent.getFrameContext();
+console.log(`Buffered frames: ${frames.length}`);
+
+frames.forEach(frame => {
+    console.log(`Frame #${frame.sequence}: ${frame.triggerReason}`);
+});
+
+// Clear frame history
+agent.clearHistory(); // Also clears frame buffer
+```
+
+### Requesting Frames
+
+You can programmatically request the client to capture a frame:
+
+```typescript
+// Request frame with reason
+agent.requestFrameCapture("user_request");
+
+// Trigger reasons:
+// - "scene_change": Automatic capture on scene change
+// - "user_request": Manual request from server
+// - "timer": Periodic capture
+// - "initial": First frame on connection
+```
+
+## Client WebSocket Messages
+
+### Video Frame
+
+```javascript
+socket.send(JSON.stringify({
+    type: "video_frame",
+    sessionId: "session_123",
+    sequence: 1,
+    timestamp: Date.now(),
+    triggerReason: "scene_change",
+    image: {
+        data: base64EncodedImage,
+        format: "webp",  // or "jpeg", "png"
+        width: 640,
+        height: 480
+    }
+}));
+```
+
+### Audio (same as VoiceAgent)
+
+```javascript
+socket.send(JSON.stringify({
+    type: "audio",
+    sessionId: "session_123",
+    data: base64AudioData,
+    format: "mp3",
+    timestamp: Date.now()
+}));
+```
+
+### Text Transcript
+
+```javascript
+socket.send(JSON.stringify({
+    type: "transcript",
+    text: "What am I holding?"
+}));
+```
+
+## Server Responses
+
+In addition to standard VoiceAgent responses, VideoAgent sends:
+
+### Frame Acknowledgment
+
+```json
+{
+    "type": "frame_ack",
+    "sequence": 1,
+    "timestamp": 1234567890
+}
+```
+
+### Frame Request
+
+```json
+{
+    "type": "capture_frame",
+    "reason": "user_request",
+    "timestamp": 1234567890
+}
+```
+
+### Session Initialization
+
+```json
+{
+    "type": "session_init",
+    "sessionId": "vs_abc123_xyz789"
+}
+```
+
+## Usage Patterns
+
+### Visual Question Answering
+
+```typescript
+// User asks: "What color is this?"
+// Agent automatically uses latest frame from buffer
+// Response: "That's a blue coffee mug."
+```
+
+### Scene Understanding
+
+```typescript
+// Agent can describe scenes
+// User: "Describe what you see"
+// Response: "I can see a desk with a laptop, a coffee mug, 
+//            and some papers. The room appears to be an office."
+```
+
+### Object Detection
+
+```typescript
+// User: "How many people are in the room?"
+// Agent analyzes frame and counts
+// Response: "I can see 3 people in the frame."
+```
+
+### Visual Context in Conversations
+
+```typescript
+// User: "What's the weather like?" (shows window view)
+// Agent sees sunny sky in frame
+// Response: "Based on what I can see through your window, 
+//            it looks sunny! Let me check the forecast..." 
+// [Tool call: getWeather]
+```
+
+## Performance Optimization
+
+### Token Usage
+
+Each frame adds approximately 100-400 tokens depending on resolution:
+
+```typescript
+// Conservative: fewer frames, less cost
+maxContextFrames: 3,
+
+// Balanced: good history, moderate cost
+maxContextFrames: 6,
+
+// Rich history: more context, higher cost
+maxContextFrames: 10,
+```
+
+### Frame Quality vs Bandwidth
+
+```typescript
+// Lower quality, faster transmission
+maxFrameInputSize: 500_000,  // 500 KB
+
+// Balanced
+maxFrameInputSize: 2_500_000,  // 2.5 MB
+
+// High quality
+maxFrameInputSize: 5_000_000,  // 5 MB (default)
+```
+
+### Frame Capture Strategy
+
+On the client side, optimize when to send frames:
+
+```javascript
+// Option 1: On scene change (smart, efficient)
+if (sceneChangeDetected()) {
+    captureAndSendFrame("scene_change");
+}
+
+// Option 2: On user speech (contextual)
+audioStream.on("start", () => {
+    captureAndSendFrame("user_request");
+});
+
+// Option 3: Periodic (predictable, may be wasteful)
+setInterval(() => {
+    captureAndSendFrame("timer");
+}, 5000); // Every 5 seconds
+```
+
+## Example Output
+
+```
+[video-ws] listening on ws://localhost:8081
+[video-ws] Connect your video client to ws://localhost:8081
+
+[video-ws] ✓ client connected
+[video] Frame #1 (initial) 234 kB 640×480
+[frames] Saved frame_00001.webp (234.5 kB, 640×480, initial)
+
+[video] Audio received: 45320 bytes, format: mp3
+[video] Transcription: "What am I holding?" (en)
+[video] Frame #2 (user_request) 228 kB 640×480
+[frames] Saved frame_00002.webp (228.3 kB, 640×480, user_request)
+
+[video] Text (user): What am I holding?
+[video] Speech started
+You're holding a blue coffee mug with a white handle.
+[video] Audio chunk #1: "You're holding a blue coffee mug with a white..."
+[video] Speech complete
+```
+
+## Next Steps
+
+- [Basic Usage](/examples/basic-usage) - VoiceAgent fundamentals
+- [Custom Tools](/examples/custom-tools) - Add custom functionality
+- [API Reference](/api/video-agent) - Full VideoAgent API

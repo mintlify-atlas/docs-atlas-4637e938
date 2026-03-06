@@ -1,0 +1,470 @@
+---
+title: 'SpeechManager'
+description: 'Manages text-to-speech generation and streaming for voice agents'
+---
+
+## Overview
+
+The `SpeechManager` class handles all text-to-speech (TTS) operations for voice agents. It supports both full-text and streaming speech generation, parallel TTS requests for reduced latency, and speech interruption for natural conversation flow (barge-in).
+
+**Key responsibilities:**
+- Generate speech from text using AI SDK speech models
+- Stream speech as text arrives from LLM (sentence-by-sentence)
+- Manage parallel TTS requests to minimize latency
+- Handle speech interruption when user speaks
+- Queue and process speech chunks in order
+- Extract sentences from streaming text with intelligent chunking
+
+**Location:** `src/core/SpeechManager.ts:24`
+
+## Constructor
+
+```typescript
+new SpeechManager(options: SpeechManagerOptions)
+```
+
+<ParamField path="options" type="SpeechManagerOptions" required>
+  Configuration object for the speech manager
+</ParamField>
+
+<ParamField path="options.speechModel" type="SpeechModel" required>
+  AI SDK speech model instance (e.g., `openai.speech('tts-1')`)
+</ParamField>
+
+<ParamField path="options.voice" type="string" default="alloy">
+  Voice identifier for the TTS model (e.g., 'alloy', 'echo', 'nova')
+</ParamField>
+
+<ParamField path="options.speechInstructions" type="string">
+  Optional instructions to guide speech generation (model-specific)
+</ParamField>
+
+<ParamField path="options.outputFormat" type="string" default="opus">
+  Audio format for generated speech (e.g., 'opus', 'mp3', 'pcm')
+</ParamField>
+
+<ParamField path="options.streamingSpeech" type="Partial<StreamingSpeechConfig>">
+  Configuration for streaming speech behavior:
+  - `minChunkSize`: Minimum characters before generating speech (default: 50)
+  - `maxChunkSize`: Maximum characters in a chunk (default: 300)
+  - `parallelGeneration`: Enable parallel TTS requests (default: true)
+  - `maxParallelRequests`: Max concurrent TTS requests (default: 3)
+</ParamField>
+
+## Properties
+
+### isSpeaking
+
+```typescript
+get isSpeaking(): boolean
+```
+
+<ResponseField name="isSpeaking" type="boolean">
+  Returns `true` if the manager is currently processing and sending speech chunks.
+</ResponseField>
+
+### pendingChunkCount
+
+```typescript
+get pendingChunkCount(): number
+```
+
+<ResponseField name="pendingChunkCount" type="number">
+  Returns the number of speech chunks queued for generation/sending.
+</ResponseField>
+
+### hasSpeechModel
+
+```typescript
+get hasSpeechModel(): boolean
+```
+
+<ResponseField name="hasSpeechModel" type="boolean">
+  Returns `true` if a speech model is configured. If `false`, no TTS will be generated.
+</ResponseField>
+
+### queueDonePromise
+
+```typescript
+get queueDonePromise(): Promise<void> | undefined
+```
+
+<ResponseField name="queueDonePromise" type="Promise<void> | undefined">
+  Returns a Promise that resolves when the speech queue is fully drained, or `undefined` if no speech is queued.
+</ResponseField>
+
+### sendMessage
+
+```typescript
+public sendMessage: (message: Record<string, unknown>) => void
+```
+
+<ParamField path="sendMessage" type="(message: Record<string, unknown>) => void" required>
+  Callback function to send messages over WebSocket. Must be set by the parent agent.
+</ParamField>
+
+## Methods
+
+### generateSpeechFromText()
+
+Generate speech audio from text using the configured speech model.
+
+```typescript
+generateSpeechFromText(
+  text: string,
+  abortSignal?: AbortSignal
+): Promise<Uint8Array>
+```
+
+<ParamField path="text" type="string" required>
+  The text to convert to speech
+</ParamField>
+
+<ParamField path="abortSignal" type="AbortSignal">
+  Optional AbortSignal to cancel the generation request
+</ParamField>
+
+**Returns:** Promise resolving to audio data as `Uint8Array`.
+
+**Throws:** Error if no speech model is configured.
+
+**Example:**
+```typescript
+const audioData = await speechManager.generateSpeechFromText(
+  'Hello, how can I help you?'
+);
+```
+
+### generateAndSendSpeechFull()
+
+Generate speech for full text at once (non-streaming fallback).
+
+```typescript
+generateAndSendSpeechFull(text: string): Promise<void>
+```
+
+<ParamField path="text" type="string" required>
+  The complete text to convert to speech
+</ParamField>
+
+**Returns:** Promise that resolves when audio is generated and sent.
+
+**Events emitted:**
+- `speech_start` - Before generation begins
+- `audio` - When audio is ready
+- `speech_complete` - After sending audio
+- `error` - If generation fails
+
+**Example:**
+```typescript
+await speechManager.generateAndSendSpeechFull(
+  'The weather today is sunny with a high of 75 degrees.'
+);
+```
+
+### processTextDelta()
+
+Process a text chunk from streaming LLM output. Automatically extracts sentences and queues speech generation.
+
+```typescript
+processTextDelta(textDelta: string): void
+```
+
+<ParamField path="textDelta" type="string" required>
+  A chunk of text from the LLM stream
+</ParamField>
+
+**Example:**
+```typescript
+// Called as text arrives from LLM
+for await (const chunk of llmStream) {
+  speechManager.processTextDelta(chunk.text);
+}
+```
+
+**Implementation details:**
+- Accumulates text in internal buffer
+- Extracts complete sentences using regex patterns
+- Respects `minChunkSize` and `maxChunkSize` config
+- Handles incomplete sentences gracefully
+- Automatically starts speech queue processing
+
+### flushPendingText()
+
+Flush any remaining text in the buffer to speech. Call this when the LLM stream ends.
+
+```typescript
+flushPendingText(): void
+```
+
+**Example:**
+```typescript
+// After LLM stream completes
+for await (const chunk of llmStream) {
+  speechManager.processTextDelta(chunk.text);
+}
+speechManager.flushPendingText(); // Generate speech for remaining text
+```
+
+### interruptSpeech()
+
+Interrupt ongoing speech generation and playback (barge-in support).
+
+```typescript
+interruptSpeech(reason?: string): void
+```
+
+<ParamField path="reason" type="string" default="interrupted">
+  Reason for interruption (e.g., 'user_spoke', 'timeout')
+</ParamField>
+
+**Effects:**
+- Aborts all pending TTS generation requests
+- Clears the speech queue
+- Clears the pending text buffer
+- Sends `speech_interrupted` message to client
+- Resolves the `queueDonePromise` immediately
+
+**Example:**
+```typescript
+// When user starts speaking
+transcriptionManager.on('audio_received', () => {
+  speechManager.interruptSpeech('user_spoke');
+});
+```
+
+### reset()
+
+Reset all speech state (used on disconnect or cleanup).
+
+```typescript
+reset(): void
+```
+
+**Effects:**
+- Aborts current speech generation
+- Clears all queues and buffers
+- Resets speaking state
+- Resolves pending promises
+
+**Example:**
+```typescript
+// On agent disconnect
+agent.on('disconnected', () => {
+  speechManager.reset();
+});
+```
+
+## Events
+
+The `SpeechManager` extends `EventEmitter` and emits the following events:
+
+### speech_start
+
+Emitted when speech generation begins.
+
+```typescript
+speechManager.on('speech_start', (data) => {
+  console.log('Streaming:', data.streaming);
+});
+```
+
+<ResponseField name="data.text" type="string">
+  The text being spoken (only for full-text mode)
+</ResponseField>
+
+<ResponseField name="data.streaming" type="boolean">
+  `true` for streaming mode, `false` for full-text mode
+</ResponseField>
+
+### speech_complete
+
+Emitted when all speech has been generated and sent.
+
+```typescript
+speechManager.on('speech_complete', (data) => {
+  console.log('Speech done, streaming:', data.streaming);
+});
+```
+
+### speech_interrupted
+
+Emitted when speech is interrupted.
+
+```typescript
+speechManager.on('speech_interrupted', (data) => {
+  console.log('Interrupted:', data.reason);
+});
+```
+
+### speech_chunk_queued
+
+Emitted when a speech chunk is queued for generation.
+
+```typescript
+speechManager.on('speech_chunk_queued', (data) => {
+  console.log(`Chunk ${data.id}: ${data.text}`);
+});
+```
+
+### audio
+
+Emitted when audio is generated (full-text mode).
+
+```typescript
+speechManager.on('audio', (data) => {
+  console.log(`Audio: ${data.format}, ${data.data.length} bytes`);
+});
+```
+
+<ResponseField name="data.data" type="string">
+  Base64-encoded audio data
+</ResponseField>
+
+<ResponseField name="data.format" type="string">
+  Audio format (e.g., 'opus', 'mp3')
+</ResponseField>
+
+<ResponseField name="data.uint8Array" type="Uint8Array">
+  Raw audio data as Uint8Array
+</ResponseField>
+
+### audio_chunk
+
+Emitted when a speech chunk is ready (streaming mode).
+
+```typescript
+speechManager.on('audio_chunk', (data) => {
+  console.log(`Chunk ${data.chunkId}: ${data.text}`);
+});
+```
+
+<ResponseField name="data.chunkId" type="number">
+  Sequential chunk identifier
+</ResponseField>
+
+<ResponseField name="data.text" type="string">
+  The text that was converted to speech
+</ResponseField>
+
+<ResponseField name="data.data" type="string">
+  Base64-encoded audio data
+</ResponseField>
+
+<ResponseField name="data.format" type="string">
+  Audio format
+</ResponseField>
+
+<ResponseField name="data.uint8Array" type="Uint8Array">
+  Raw audio data
+</ResponseField>
+
+### error
+
+Emitted when speech generation fails.
+
+```typescript
+speechManager.on('error', (error) => {
+  console.error('Speech error:', error);
+});
+```
+
+## Streaming Speech Architecture
+
+The SpeechManager implements intelligent streaming speech with parallel generation:
+
+### Sentence Extraction
+
+1. **Accumulates text** in `pendingTextBuffer` as deltas arrive
+2. **Extracts sentences** using regex: `/[.!?]+(?:\s+|$)/g`
+3. **Respects chunk size limits** (minChunkSize: 50, maxChunkSize: 300)
+4. **Handles clause splitting** for long sentences using `/[,;:]\s+/g`
+5. **Merges short sentences** to avoid tiny speech chunks
+
+### Parallel Generation
+
+When `parallelGeneration: true` (default):
+
+1. **Starts TTS immediately** when sentence is extracted
+2. **Limits concurrent requests** (default: 3 parallel requests)
+3. **Maintains order** - sends chunks in sequence even if generated out of order
+4. **Reduces latency** - next chunk is ready by the time previous finishes
+
+### Queue Processing
+
+```typescript
+// Internal queue processing flow
+while (speechChunkQueue.length > 0) {
+  const chunk = speechChunkQueue[0];
+  
+  // Wait for this chunk's audio (may already be ready)
+  const audioData = await chunk.audioPromise;
+  
+  // Send to client
+  sendMessage({ type: 'audio_chunk', data, chunkId: chunk.id });
+  
+  // Remove from queue
+  speechChunkQueue.shift();
+  
+  // Start generating more chunks in parallel
+  startNextChunks();
+}
+```
+
+## Usage in Agent Architecture
+
+```typescript
+class VoiceAgent {
+  private speechManager: SpeechManager;
+
+  constructor(config: VoiceAgentConfig) {
+    this.speechManager = new SpeechManager({
+      speechModel: config.speechModel,
+      voice: config.voice,
+      streamingSpeech: {
+        parallelGeneration: true,
+        maxParallelRequests: 3
+      }
+    });
+    
+    // Connect to WebSocket
+    this.speechManager.sendMessage = (msg) => {
+      this.wsManager.send(msg);
+    };
+  }
+
+  async handleUserInput(text: string) {
+    const stream = await this.generateLLMResponse(text);
+    
+    // Process streaming text for speech
+    for await (const chunk of stream) {
+      this.speechManager.processTextDelta(chunk.text);
+    }
+    
+    // Flush remaining text
+    this.speechManager.flushPendingText();
+    
+    // Wait for speech to complete
+    await this.speechManager.queueDonePromise;
+  }
+}
+```
+
+## Performance Optimization
+
+<Tip>
+  **Parallel generation** significantly reduces perceived latency. With 3 parallel requests and 2-second TTS latency, the user hears speech starting ~2 seconds after the first sentence, then continuous audio without gaps.
+</Tip>
+
+### Tuning Parameters
+
+- **minChunkSize: 50** - Shorter = faster start, but more requests
+- **maxChunkSize: 300** - Prevents extremely long TTS requests
+- **maxParallelRequests: 3** - Balance between latency and API load
+- **parallelGeneration: true** - Essential for low-latency streaming
+
+## Related
+
+- [WebSocketManager](/api/websocket-manager) - Sends speech audio to clients
+- [StreamProcessor](/api/stream-processor) - Provides text deltas for speech generation
+- [VoiceAgent](/api/voice-agent) - Orchestrates speech generation with LLM responses

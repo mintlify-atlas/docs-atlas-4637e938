@@ -1,0 +1,343 @@
+---
+title: 'ConversationManager'
+description: 'Manages conversation history for voice agents with automatic trimming'
+---
+
+## Overview
+
+The `ConversationManager` class maintains the conversation history for voice agents as an array of `ModelMessage` objects (AI SDK format). It implements automatic history trimming based on configurable limits to prevent context overflow and manage token costs.
+
+**Key responsibilities:**
+- Store conversation history as `ModelMessage[]` array
+- Add new messages and maintain turn order
+- Automatically trim history to stay within limits
+- Preserve conversation coherence (removes pairs of messages)
+- Emit events when history is modified
+
+**Location:** `src/core/ConversationManager.ts:13`
+
+## Constructor
+
+```typescript
+new ConversationManager(options?: ConversationManagerOptions)
+```
+
+<ParamField path="options" type="ConversationManagerOptions">
+  Optional configuration object
+</ParamField>
+
+<ParamField path="options.history" type="Partial<HistoryConfig>">
+  History management configuration:
+  - `maxMessages`: Maximum number of messages to retain (default: 20)
+  - `maxTotalChars`: Maximum total characters across all messages (default: 50000)
+</ParamField>
+
+**Example:**
+```typescript
+const conversationManager = new ConversationManager({
+  history: {
+    maxMessages: 30,
+    maxTotalChars: 100000
+  }
+});
+```
+
+## Properties
+
+### length
+
+```typescript
+get length(): number
+```
+
+<ResponseField name="length" type="number">
+  Returns the current number of messages in the conversation history.
+</ResponseField>
+
+## Methods
+
+### addMessage()
+
+Add a message to the conversation history and automatically trim if needed.
+
+```typescript
+addMessage(message: ModelMessage): void
+```
+
+<ParamField path="message" type="ModelMessage" required>
+  A message object compatible with AI SDK's `ModelMessage` type (contains `role` and `content`)
+</ParamField>
+
+**Example:**
+```typescript
+// Add user message
+conversationManager.addMessage({
+  role: 'user',
+  content: 'What is the weather today?'
+});
+
+// Add assistant message
+conversationManager.addMessage({
+  role: 'assistant',
+  content: 'The weather today is sunny with a high of 75 degrees.'
+});
+```
+
+**Implementation notes:**
+- Appends message to the end of history
+- Automatically calls `trimHistory()` after adding
+- Does not validate message format
+
+### getHistory()
+
+Get a copy of the current conversation history.
+
+```typescript
+getHistory(): ModelMessage[]
+```
+
+**Returns:** A shallow copy of the history array. Modifying this array does not affect the internal state.
+
+**Example:**
+```typescript
+const history = conversationManager.getHistory();
+console.log(`History length: ${history.length}`);
+```
+
+<Tip>
+  Use `getHistory()` when you need to pass history to external functions without risk of accidental modification.
+</Tip>
+
+### getHistoryRef()
+
+Get a direct reference to the internal history array.
+
+```typescript
+getHistoryRef(): ModelMessage[]
+```
+
+**Returns:** Direct reference to the internal `ModelMessage[]` array.
+
+<Warning>
+  Use with caution. Modifying this array directly bypasses trimming logic and events. Prefer `getHistory()` for safe read access or `addMessage()` for modifications.
+</Warning>
+
+**Use case:**
+```typescript
+// Efficient read-only iteration (avoid copy overhead)
+for (const message of conversationManager.getHistoryRef()) {
+  console.log(message.role, message.content);
+}
+```
+
+### setHistory()
+
+Replace the entire conversation history with a new array.
+
+```typescript
+setHistory(history: ModelMessage[]): void
+```
+
+<ParamField path="history" type="ModelMessage[]" required>
+  New conversation history array
+</ParamField>
+
+**Example:**
+```typescript
+// Load conversation from storage
+const savedHistory = await loadFromDatabase(sessionId);
+conversationManager.setHistory(savedHistory);
+```
+
+**Implementation notes:**
+- Creates a shallow copy of the provided array
+- Does NOT automatically trim the history
+- Does NOT emit any events
+
+### clearHistory()
+
+Remove all messages from the conversation history.
+
+```typescript
+clearHistory(): void
+```
+
+**Example:**
+```typescript
+// Reset conversation
+conversationManager.clearHistory();
+console.log(`History cleared: ${conversationManager.length === 0}`);
+```
+
+**Effects:**
+- Sets history to empty array
+- Emits `history_cleared` event
+
+## Events
+
+The `ConversationManager` extends `EventEmitter` and emits the following events:
+
+### history_cleared
+
+Emitted when the conversation history is cleared.
+
+```typescript
+conversationManager.on('history_cleared', () => {
+  console.log('Conversation history cleared');
+});
+```
+
+### history_trimmed
+
+Emitted when messages are automatically removed to stay within limits.
+
+```typescript
+conversationManager.on('history_trimmed', (data) => {
+  console.log(`Trimmed ${data.removedCount} messages, reason: ${data.reason}`);
+});
+```
+
+<ResponseField name="data.removedCount" type="number">
+  Number of messages removed from history
+</ResponseField>
+
+<ResponseField name="data.reason" type="'max_messages' | 'max_total_chars'">
+  The limit that triggered trimming:
+  - `max_messages`: Exceeded the message count limit
+  - `max_total_chars`: Exceeded the total character limit
+</ResponseField>
+
+## History Trimming Logic
+
+### Message Count Trimming
+
+When history exceeds `maxMessages`:
+
+1. Calculates excess messages: `excess = length - maxMessages`
+2. **Rounds up to even number** to preserve user/assistant turn pairs
+3. Removes oldest messages from the beginning of the array
+4. Emits `history_trimmed` event with reason `max_messages`
+
+```typescript
+// Example: maxMessages = 20, current = 23
+// Excess = 3, rounds to 4
+// Removes messages [0-3], keeps [4-22]
+```
+
+### Character Count Trimming
+
+When total characters exceed `maxTotalChars`:
+
+1. Calculates total characters across all messages (including JSON-stringified complex content)
+2. Removes oldest messages **one at a time** until under limit
+3. **Always keeps at least 2 messages** (one user/assistant pair)
+4. Emits `history_trimmed` event with reason `max_total_chars`
+
+```typescript
+// Example: maxTotalChars = 50000, current = 75000
+// Removes messages from start until total < 50000
+```
+
+### Preserving Conversation Coherence
+
+<Info>
+  The manager attempts to preserve complete conversation turns by removing messages in pairs. This ensures the history always starts with a user message followed by an assistant response.
+</Info>
+
+## Usage in Agent Architecture
+
+```typescript
+class VoiceAgent {
+  private conversationManager: ConversationManager;
+
+  constructor(config: VoiceAgentConfig) {
+    this.conversationManager = new ConversationManager({
+      history: config.history
+    });
+    
+    // Monitor trimming events
+    this.conversationManager.on('history_trimmed', (data) => {
+      console.log(`Trimmed ${data.removedCount} messages: ${data.reason}`);
+    });
+  }
+
+  async processUserInput(text: string) {
+    // Add user message
+    this.conversationManager.addMessage({
+      role: 'user',
+      content: text
+    });
+    
+    // Generate response
+    const response = await this.generateResponse(
+      this.conversationManager.getHistory()
+    );
+    
+    // Add assistant message
+    this.conversationManager.addMessage({
+      role: 'assistant',
+      content: response
+    });
+  }
+
+  getConversationContext(): ModelMessage[] {
+    // Get conversation for LLM
+    return this.conversationManager.getHistory();
+  }
+}
+```
+
+## Configuration Guidelines
+
+### maxMessages
+
+<ParamField path="maxMessages" type="number" default={20}>
+  Recommended values:
+  - **Short conversations:** 10-20 messages (5-10 turns)
+  - **Standard conversations:** 20-40 messages (10-20 turns)
+  - **Extended conversations:** 40-100 messages (20-50 turns)
+  - **Unlimited:** Set to 0 to disable (relies on maxTotalChars only)
+</ParamField>
+
+### maxTotalChars
+
+<ParamField path="maxTotalChars" type="number" default={50000}>
+  Recommended values based on model context:
+  - **GPT-3.5-turbo (4K):** 10,000-15,000 chars
+  - **GPT-3.5-turbo (16K):** 40,000-50,000 chars
+  - **GPT-4 (8K):** 20,000-30,000 chars
+  - **GPT-4 (32K):** 80,000-100,000 chars
+  - **GPT-4-turbo (128K):** 300,000-400,000 chars
+  - **Unlimited:** Set to 0 to disable
+</ParamField>
+
+<Tip>
+  Leave room for system prompts, tool definitions, and response tokens. A good rule of thumb is to use ~40% of the model's context window for history.
+</Tip>
+
+## Performance Considerations
+
+### Memory Usage
+
+- **Message storage:** Each message contains role + content string
+- **Character counting:** Recalculated on every trim (O(n) where n = message count)
+- **Typical memory:** ~100 messages = ~1-2 MB depending on content length
+
+### Optimization Tips
+
+1. **Set appropriate limits** - Don't keep more history than needed for conversation quality
+2. **Use getHistoryRef()** for read-only iteration to avoid copy overhead
+3. **Batch operations** - Use `setHistory()` when loading from storage instead of repeated `addMessage()` calls
+4. **Monitor trimming events** - Track how often history is trimmed to tune limits
+
+## Thread Safety
+
+<Warning>
+  The ConversationManager is **not thread-safe**. All operations must be performed on the same event loop. Do not share instances across worker threads.
+</Warning>
+
+## Related
+
+- [VoiceAgent](/api/voice-agent) - Uses ConversationManager to maintain chat history
+- [StreamProcessor](/api/stream-processor) - Works with conversation history for LLM context
+- [AI SDK Types](https://sdk.vercel.ai/docs/reference/ai-sdk-core) - `ModelMessage` type definition

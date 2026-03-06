@@ -1,0 +1,471 @@
+---
+title: VideoAgent & Vision Models
+description: Support for vision models, video frame processing, and multimodal audio+video conversations
+---
+
+## Overview
+
+`VideoAgent` extends the voice agent architecture to support **vision-enabled models** like GPT-4o, Claude 3.5 Sonnet, and Gemini 1.5 Pro. It processes video frames alongside audio/text input for multimodal conversations.
+
+## Key Differences from VoiceAgent
+
+<CardGroup cols={2}>
+  <Card title="Frame Processing" icon="image">
+    Captures and analyzes video frames from user's camera
+  </Card>
+  
+  <Card title="Multimodal Context" icon="layer-group">
+    Combines text, audio, and visual input in a single conversation
+  </Card>
+  
+  <Card title="Frame History" icon="clock-rotate-left">
+    Maintains a buffer of recent frames for temporal context
+  </Card>
+  
+  <Card title="Session Management" icon="id-card">
+    Tracks session IDs and frame sequences for client sync
+  </Card>
+</CardGroup>
+
+## Vision Model Requirements
+
+The `model` parameter **must be a vision-enabled model** to process video frames:
+
+```ts
+import { VideoAgent } from 'voice-agent-ai-sdk';
+import { openai } from '@ai-sdk/openai';
+import { anthropic } from '@ai-sdk/anthropic';
+import { google } from '@ai-sdk/google';
+
+// ✅ Vision-enabled models
+const agent = new VideoAgent({
+  model: openai('gpt-4o'),              // OpenAI GPT-4o
+  // OR
+  model: anthropic('claude-3.5-sonnet'), // Anthropic Claude 3.5 Sonnet
+  // OR
+  model: google('gemini-1.5-pro'),      // Google Gemini 1.5 Pro
+  
+  transcriptionModel: openai.transcription('whisper-1'),
+  speechModel: openai.speech('gpt-4o-mini-tts'),
+  instructions: `You are a helpful multimodal AI assistant that can see through the user's camera and hear their voice.
+When analyzing images, be concise but informative.
+Keep responses conversational since they will be spoken aloud.`,
+});
+```
+
+<Warning>
+Using a non-vision model (e.g., `gpt-3.5-turbo`) will cause errors when video frames are sent.
+</Warning>
+
+## Frame Data Structure
+
+Video frames are transmitted with metadata for tracking and synchronization:
+
+```ts
+interface VideoFrame {
+  type: 'video_frame';
+  sessionId: string;         // Unique session identifier
+  sequence: number;          // Frame sequence number (auto-incrementing)
+  timestamp: number;         // Capture timestamp (milliseconds)
+  triggerReason: FrameTriggerReason;  // Why this frame was captured
+  previousFrameRef?: string; // Hash of previous frame (for change detection)
+  image: {
+    data: string;    // Base64-encoded image
+    format: string;  // 'webp', 'jpeg', 'png'
+    width: number;   // Frame width in pixels
+    height: number;  // Frame height in pixels
+  };
+}
+
+type FrameTriggerReason = 
+  | 'scene_change'  // Automatic detection of scene change
+  | 'user_request'  // User explicitly requested frame
+  | 'timer'         // Periodic capture
+  | 'initial';      // First frame of session
+```
+
+## Sending Video Frames
+
+### From Client (WebSocket)
+
+Clients send frames as WebSocket messages:
+
+```ts
+// Client-side example
+const frameData = canvas.toDataURL('image/webp').split(',')[1]; // Base64
+
+webSocket.send(JSON.stringify({
+  type: 'video_frame',
+  sessionId: sessionId,
+  sequence: frameCount++,
+  timestamp: Date.now(),
+  triggerReason: 'user_request',
+  image: {
+    data: frameData,
+    format: 'webp',
+    width: 640,
+    height: 480,
+  },
+}));
+```
+
+### From Server (Direct API)
+
+Send frames programmatically with optional text query:
+
+```ts
+// Send frame with query
+const response = await agent.sendFrame(
+  base64FrameData,
+  'What do you see in this image?',
+  {
+    width: 1280,
+    height: 720,
+    format: 'jpeg',
+  }
+);
+
+// Send frame without query (updates visual context only)
+await agent.sendFrame(base64FrameData);
+```
+
+## Frame Context Buffer
+
+`VideoAgent` maintains a sliding window of recent frames for temporal awareness:
+
+```ts
+interface FrameContext {
+  sequence: number;          // Frame sequence
+  timestamp: number;         // When captured
+  triggerReason: FrameTriggerReason;
+  frameHash: string;         // Content hash for deduplication
+  description?: string;      // Optional AI-generated description
+}
+```
+
+### Configuration
+
+```ts
+const agent = new VideoAgent({
+  model: openai('gpt-4o'),
+  maxContextFrames: 10,  // Keep last 10 frames in buffer (default: 10)
+  maxFrameInputSize: 5 * 1024 * 1024,  // 5 MB limit (default: 5 MB)
+});
+
+// Get current frame context
+const frames = agent.getFrameContext();
+console.log(`Buffered ${frames.length} frames`);
+
+// Update configuration at runtime
+agent.updateConfig({
+  maxContextFrames: 20,
+});
+```
+
+When the buffer exceeds `maxContextFrames`, the **oldest frame is removed** (FIFO).
+
+## Multimodal Content Building
+
+The agent constructs multimodal messages for vision models:
+
+```ts
+// Internal implementation
+private buildMultimodalContent(
+  text: string,
+  frameData?: string
+): Array<{ type: 'text'; text: string } | { type: 'image'; image: string }> {
+  const content = [];
+
+  // Add frame context summary
+  if (this.frameContextBuffer.length > 0) {
+    const contextSummary = `[Visual context: ${this.frameContextBuffer.length} frames captured, latest at ${new Date(this.lastFrameTimestamp).toISOString()}]`;
+    content.push({ type: 'text', text: contextSummary });
+  }
+
+  // Add image data
+  const imageData = frameData || this.currentFrameData;
+  if (imageData) {
+    content.push({ type: 'image', image: imageData });
+  }
+
+  // Add user query
+  content.push({ type: 'text', text });
+  return content;
+}
+```
+
+This produces messages in AI SDK's multimodal format:
+
+```ts
+{
+  role: 'user',
+  content: [
+    { type: 'text', text: '[Visual context: 3 frames captured...]' },
+    { type: 'image', image: 'base64EncodedImageData' },
+    { type: 'text', text: 'What am I holding?' },
+  ],
+}
+```
+
+## Frame Capture Triggers
+
+The agent can request frame captures from the client:
+
+```ts
+// Request frame capture with reason
+agent.requestFrameCapture('scene_change');
+
+// Client receives message
+{
+  type: 'capture_frame',
+  reason: 'scene_change',
+  timestamp: 1678901234567,
+}
+```
+
+### Automatic Frame Requests
+
+The agent automatically requests frames when:
+
+1. **User speaks** (transcript received)
+2. **Audio input** received
+
+```ts
+// Implementation
+case 'transcript':
+  this.interruptCurrentResponse('user_speaking');
+  this.requestFrameCapture('user_request');  // ← Auto-capture
+  await this.enqueueTextInput(message.text);
+  break;
+
+case 'audio':
+  this.interruptCurrentResponse('user_speaking');
+  this.requestFrameCapture('user_request');  // ← Auto-capture
+  await this.handleAudioInput(message.data, message.format);
+  break;
+```
+
+## Audio + Video Processing
+
+`VideoAgent` inherits all audio capabilities from `VoiceAgent`:
+
+```ts
+// Audio transcription
+const text = await agent.transcribeAudio(audioBuffer);
+
+// Text-to-speech
+const audioData = await agent.generateSpeechFromText('Response text');
+
+// Combined audio + video input
+await agent.sendAudio(base64Audio);  // Transcribed to text
+// Agent automatically requests current frame
+// LLM receives: text query + latest frame
+```
+
+## Session Management
+
+ Each `VideoAgent` instance has a unique session ID:
+
+```ts
+// Auto-generated session ID
+const agent = new VideoAgent({ model: openai('gpt-4o') });
+console.log(agent.getSessionId()); // "vs_abc123_xyz789"
+
+// Custom session ID
+const agent = new VideoAgent({
+  model: openai('gpt-4o'),
+  sessionId: 'my-session-id',
+});
+```
+
+Session IDs are sent to clients for synchronization:
+
+```ts
+// Sent when client connects
+{
+  type: 'session_init',
+  sessionId: 'vs_abc123_xyz789',
+}
+```
+
+## Events
+
+`VideoAgent` emits all `VoiceAgent` events plus:
+
+<ResponseField name="frame_received" type="object">
+  Video frame successfully processed
+  ```ts
+  {
+    sequence: number;
+    timestamp: number;
+    triggerReason: FrameTriggerReason;
+    size: number;  // Bytes
+    dimensions: { width: number; height: number };
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="frame_requested" type="object">
+  Frame capture requested from client
+  ```ts
+  {
+    reason: FrameTriggerReason;
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="client_ready" type="object">
+  Client sent ready signal with capabilities
+  ```ts
+  {
+    capabilities: {
+      video: boolean;
+      audio: boolean;
+      // ... other client capabilities
+    }
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="config_changed" type="VideoAgentConfig">
+  Configuration updated via `updateConfig()`
+</ResponseField>
+
+## State Properties
+
+`VideoAgent` adds these properties to `VoiceAgent`'s state:
+
+```ts
+agent.currentFrameSequence  // Current frame count
+agent.hasVisualContext     // Has at least one frame?
+```
+
+## Example: Video Chat Application
+
+```ts
+import { VideoAgent } from 'voice-agent-ai-sdk';
+import { openai } from '@ai-sdk/openai';
+import WebSocket from 'ws';
+
+const wss = new WebSocket.Server({ port: 8080 });
+
+wss.on('connection', (socket) => {
+  const agent = new VideoAgent({
+    model: openai('gpt-4o'),
+    transcriptionModel: openai.transcription('whisper-1'),
+    speechModel: openai.speech('gpt-4o-mini-tts'),
+    instructions: `You are a helpful AI assistant with vision capabilities.
+Describe what you see when asked.
+Keep responses conversational.`,
+    maxContextFrames: 5,
+    maxFrameInputSize: 5 * 1024 * 1024,
+  });
+
+  agent.handleSocket(socket);
+
+  // Log frame events
+  agent.on('frame_received', ({ sequence, size, dimensions }) => {
+    console.log(`Frame #${sequence}: ${size} bytes, ${dimensions.width}x${dimensions.height}`);
+  });
+
+  agent.on('text', ({ role, text }) => {
+    console.log(`${role}: ${text}`);
+  });
+
+  // Request periodic frame captures (optional)
+  const frameTimer = setInterval(() => {
+    if (agent.connected) {
+      agent.requestFrameCapture('timer');
+    }
+  }, 5000);
+
+  agent.on('disconnected', () => {
+    clearInterval(frameTimer);
+    agent.destroy();
+  });
+});
+
+console.log('Video agent server running on ws://localhost:8080');
+```
+
+## Frame Size Limits
+
+To prevent memory issues and excessive bandwidth:
+
+```ts
+const agent = new VideoAgent({
+  model: openai('gpt-4o'),
+  maxFrameInputSize: 5 * 1024 * 1024,  // 5 MB (default)
+});
+
+// Frames exceeding limit trigger error event
+agent.on('error', (error) => {
+  // Error: Frame too large (6.2 MB). Maximum allowed: 5.0 MB
+});
+```
+
+**Recommended frame settings:**
+- **Format:** `webp` (best compression)
+- **Resolution:** 640x480 to 1280x720
+- **Quality:** 0.7-0.85 (JPEG/WebP quality)
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Optimize Frame Rate">
+    Don't send frames on every video frame (30-60 FPS). Instead:
+    - Capture on user speech events (automatic)
+    - Use scene change detection
+    - Timer-based capture (1-5 second intervals)
+    - On-demand user requests
+  </Accordion>
+
+  <Accordion title="Compress Frames">
+    Use WebP format with 0.8 quality for optimal size/quality balance:
+    ```ts
+    canvas.toBlob((blob) => {
+      // Convert blob to base64
+    }, 'image/webp', 0.8);
+    ```
+  </Accordion>
+
+  <Accordion title="Handle Visual Context">
+    The model receives frame context automatically. No need to reference "the image" explicitly:
+    ```ts
+    // ❌ Redundant
+    await agent.sendFrame(frameData, 'Look at the image. What is in the image?');
+
+    // ✅ Natural
+    await agent.sendFrame(frameData, 'What do you see?');
+    ```
+  </Accordion>
+
+  <Accordion title="Clean Up Sessions">
+    Always destroy agents on disconnect:
+    ```ts
+    agent.on('disconnected', () => {
+      agent.destroy();  // Releases frame buffers and resources
+    });
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="VoiceAgent" icon="microphone" href="/concepts/voice-agent">
+    Learn about the base voice agent architecture
+  </Card>
+  
+  <Card title="Streaming Speech" icon="volume" href="/concepts/streaming-speech">
+    Understand audio synthesis and chunking
+  </Card>
+  
+  <Card title="WebSocket Protocol" icon="plug" href="/concepts/websocket-protocol">
+    Explore video frame message types
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build your first video agent
+  </Card>
+</CardGroup>
