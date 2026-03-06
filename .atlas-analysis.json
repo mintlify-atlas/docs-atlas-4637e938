@@ -1,0 +1,125 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Voice Agent AI SDK",
+  "projectDescription": "Streaming voice/text agent SDK built on AI SDK with WebSocket transport, chunked TTS, and interruption support.",
+  "theme": "palm",
+  "primaryColor": "#848c8e",
+  "lightColor": "#11161e",
+  "darkColor": "#cfd0d2",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/voice-agent",
+              "concepts/video-agent",
+              "concepts/streaming-speech",
+              "concepts/memory-management",
+              "concepts/websocket-protocol"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/configuration",
+              "guides/tool-integration",
+              "guides/browser-client",
+              "guides/interruption-handling",
+              "guides/history-management"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/basic-usage",
+              "examples/websocket-server",
+              "examples/video-agent-usage",
+              "examples/custom-tools"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Agents",
+            "pages": [
+              "api/voice-agent",
+              "api/video-agent"
+            ]
+          },
+          {
+            "group": "Core Managers",
+            "pages": [
+              "api/websocket-manager",
+              "api/speech-manager",
+              "api/conversation-manager",
+              "api/transcription-manager",
+              "api/stream-processor"
+            ]
+          },
+          {
+            "group": "Types & Interfaces",
+            "pages": [
+              "api/types",
+              "api/events"
+            ]
+          },
+          {
+            "group": "Resources",
+            "pages": [
+              "changelog",
+              "troubleshooting",
+              "migration-guide"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Streaming text generation with AI SDK and multi-step tool calling",
+    "Chunked streaming TTS with parallel generation and low latency",
+    "Audio transcription via Whisper",
+    "Barge-in and interruption support for natural conversations",
+    "Memory management with configurable history limits",
+    "Serial request queue preventing race conditions",
+    "Full WebSocket protocol for real-time communication",
+    "Video agent support for vision-enabled models"
+  ],
+  "publicApiSurface": [
+    "VoiceAgent",
+    "VideoAgent",
+    "VoiceAgentOptions",
+    "VideoAgentOptions",
+    "sendText()",
+    "sendAudio()",
+    "sendAudioBuffer()",
+    "transcribeAudio()",
+    "connect()",
+    "disconnect()",
+    "destroy()",
+    "interruptSpeech()",
+    "interruptCurrentResponse()",
+    "WebSocketManager",
+    "SpeechManager",
+    "ConversationManager",
+    "TranscriptionManager",
+    "StreamProcessor",
+    "StreamingSpeechConfig",
+    "HistoryConfig",
+    "SpeechChunk"
+  ]
+}
